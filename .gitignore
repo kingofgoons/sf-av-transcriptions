@@ -1,0 +1,3 @@
+# Exclude Snowflake stage files
+AUDIO_VIDEO_STAGE_FILES/**
+!AUDIO_VIDEO_STAGE_FILES/.gitkeep
