@@ -998,14 +998,15 @@ def main():
                                         with col2:
                                             # Create CSV for search results
                                             search_csv_df = convert_search_results_to_csv(context_segments, file_info, search_term)
-                                            search_srt_content = convert_search_results_to_srt(context_segments, file_info, search_term)
+                                            search_srt_content_with_speakers = convert_search_results_to_srt(context_segments, file_info, search_term, include_speakers=True)
+                                            search_srt_content_no_speakers = convert_search_results_to_srt(context_segments, file_info, search_term, include_speakers=False)
                                             
                                             # Clean filename for downloads
                                             clean_filename = re.sub(r'[^\w\-_\.]', '_', row['FILE_NAME'])
                                             clean_search_term = re.sub(r'[^\w\-_]', '_', search_term)
                                             
                                             # Export buttons in mini columns
-                                            btn_col1, btn_col2 = st.columns(2)
+                                            btn_col1, btn_col2, btn_col3 = st.columns(3)
                                             
                                             with btn_col1:
                                                 if search_csv_df is not None:
@@ -1022,16 +1023,29 @@ def main():
                                                     )
                                             
                                             with btn_col2:
-                                                if search_srt_content:
+                                                if search_srt_content_with_speakers:
                                                     search_srt_filename = f"search_{clean_search_term}_{clean_filename}.srt"
                                                     
                                                     st.download_button(
-                                                        label="🎬 SRT",
-                                                        data=search_srt_content,
+                                                        label="🎬 SRT (w/ Speakers)",
+                                                        data=search_srt_content_with_speakers,
                                                         file_name=search_srt_filename,
                                                         mime="application/x-subrip",
-                                                        help="Export as SRT subtitles",
-                                                        key=f"srt_{idx}_{row['FILE_NAME']}"
+                                                        help="Export as SRT with speaker labels",
+                                                        key=f"srt_speakers_{idx}_{row['FILE_NAME']}"
+                                                    )
+                                            
+                                            with btn_col3:
+                                                if search_srt_content_no_speakers:
+                                                    search_srt_filename_no_speakers = f"search_{clean_search_term}_{clean_filename}_no_speakers.srt"
+                                                    
+                                                    st.download_button(
+                                                        label="🎬 SRT (no Speakers)",
+                                                        data=search_srt_content_no_speakers,
+                                                        file_name=search_srt_filename_no_speakers,
+                                                        mime="application/x-subrip",
+                                                        help="Export as SRT without speaker labels",
+                                                        key=f"srt_no_speakers_{idx}_{row['FILE_NAME']}"
                                                     )
                                         
                                         with st.expander(expander_label, expanded=True):
@@ -1125,17 +1139,14 @@ def main():
                         'language': file_row['DETECTED_LANGUAGE']
                     }
                     
-                    # Create export data
-                    csv_df = convert_speaker_segments_to_csv(speaker_segments, file_info)
-                    srt_content = convert_speaker_segments_to_srt(speaker_segments, file_info)
-                    
                     # Clean filename for download
                     clean_filename = re.sub(r'[^\w\-_\.]', '_', selected_file)
                     
                     # Export buttons in columns
-                    export_col1, export_col2 = st.columns(2)
+                    export_col1, export_col2, export_col3 = st.columns(3)
                     
                     with export_col1:
+                        csv_df = convert_speaker_segments_to_csv(speaker_segments, file_info)
                         if csv_df is not None:
                             csv_string = create_csv_download(csv_df, selected_file)
                             download_filename = f"transcript_{clean_filename}.csv"
@@ -1151,52 +1162,50 @@ def main():
                             st.warning("CSV unavailable")
                     
                     with export_col2:
-                        if srt_content:
+                        # SRT with speakers
+                        srt_content_with_speakers = convert_speaker_segments_to_srt(speaker_segments, file_info, include_speakers=True)
+                        if srt_content_with_speakers:
                             srt_filename = f"transcript_{clean_filename}.srt"
                             
                             st.download_button(
-                                label="📥 SRT",
-                                data=srt_content,
+                                label="📥 SRT (With Speakers)",
+                                data=srt_content_with_speakers,
                                 file_name=srt_filename,
                                 mime="application/x-subrip",
-                                help="Download as SRT subtitle file"
+                                help="Download as SRT with speaker labels"
                             )
                         else:
                             st.warning("SRT unavailable")
                     
-                    # Export options
-                    with st.expander("⚙️ Export Settings"):
-                        include_speaker_names = st.checkbox(
-                            "Include speaker names in SRT", 
-                            value=True, 
-                            help="Add speaker identification to subtitle text"
-                        )
-                        
-                        # Regenerate SRT with updated settings if changed
-                        if not include_speaker_names:
-                            srt_content = convert_speaker_segments_to_srt(speaker_segments, file_info, include_speakers=False)
-                            srt_filename = f"transcript_{clean_filename}.srt"
+                    with export_col3:
+                        # SRT without speakers
+                        srt_content_no_speakers = convert_speaker_segments_to_srt(speaker_segments, file_info, include_speakers=False)
+                        if srt_content_no_speakers:
+                            srt_filename_no_speakers = f"transcript_{clean_filename}_no_speakers.srt"
                             
                             st.download_button(
                                 label="📥 SRT (No Speakers)",
-                                data=srt_content,
-                                file_name=srt_filename,
+                                data=srt_content_no_speakers,
+                                file_name=srt_filename_no_speakers,
                                 mime="application/x-subrip",
-                                help="Download SRT without speaker names",
-                                key="srt_no_speakers"
+                                help="Download as SRT without speaker labels"
                             )
-                        
-                        st.markdown("**📋 Format Preview:**")
-                        if include_speaker_names:
-                            st.code("""1
+                        else:
+                            st.warning("SRT unavailable")
+                    
+                    # Format preview expander
+                    with st.expander("📋 Format Preview"):
+                        st.markdown("**SRT with Speakers:**")
+                        st.code("""1
 00:00:15,200 --> 00:00:32,100
 Speaker_0: Welcome to today's meeting...
 
 2
 00:00:33,000 --> 00:00:45,200
 Speaker_1: Thank you for having me here...""")
-                        else:
-                            st.code("""1
+                        
+                        st.markdown("**SRT without Speakers:**")
+                        st.code("""1
 00:00:15,200 --> 00:00:32,100
 Welcome to today's meeting...
 
@@ -1204,8 +1213,7 @@ Welcome to today's meeting...
 00:00:33,000 --> 00:00:45,200
 Thank you for having me here...""")
                         
-                        # Show CSV preview
-                        st.markdown("**📊 CSV Preview:**")
+                        st.markdown("**CSV Preview:**")
                         st.markdown("Columns: Segment, Speaker, Start_Time, End_Time, Start_Seconds, End_Seconds, Duration_Seconds, Text")
                         
                         if csv_df is not None and len(csv_df) > 5:
