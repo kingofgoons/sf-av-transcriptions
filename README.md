@@ -64,7 +64,7 @@ This project provides a scalable transcription pipeline that:
 1. Upload the notebook to the `NOTEBOOK_STAGE`:
    - In Snowsight: Data > Databases > TRANSCRIPTION_DB > TRANSCRIPTION_SCHEMA > Stages > NOTEBOOK_STAGE
    - Upload `notebooks/audio_video_transcription.ipynb`
-   - Upload `scripts/install_ffmpeg.sh`
+   - Note: FFmpeg is pre-installed in Container Runtime GPU environments, no additional scripts needed
 
 ### Step 3: Create and Run Notebook
 
@@ -255,12 +255,12 @@ for i in range(0, len(media_files), batch_size):
 audio-video-transcription-snowflake/
 ├── scripts/
 │   ├── setup.sql              # Snowflake database setup
-│   └── install_ffmpeg.sh      # FFmpeg installation script
+│   └── install_ffmpeg.sh      # FFmpeg installation (optional, usually pre-installed)
 ├── notebooks/
 │   └── audio_video_transcription.ipynb  # Main transcription notebook
 ├── streamlit/
-│   └── transcription_dashboard.py       # Optional web dashboard
-├── environment.yml            # Conda environment
+│   └── transcription_dashboard.py       # Streamlit in Snowflake dashboard
+├── environment.yml            # Minimal conda environment
 └── README.md                 # This file
 ```
 
