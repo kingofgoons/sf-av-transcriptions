@@ -14,14 +14,15 @@ This project provides a scalable transcription pipeline that:
 ## ✨ Features
 
 - **Batch Processing**: Transcribe multiple files automatically
+- **Smart Deduplication**: Skip already-transcribed files to save compute
 - **Multi-format Support**: MP3, WAV, MP4, AVI, MOV, and more
 - **Language Detection**: Automatic language identification
-- **Speaker Diarization**: Identify and separate different speakers
+- **Speaker Diarization**: Identify and separate different speakers (optional)
 - **JSON Output**: Structured transcripts with speaker segments and timestamps
 - **GPU Acceleration**: Faster processing with Snowflake's GPU compute
 - **Metadata Capture**: File size, duration, processing time, speaker count
 - **Search & Analytics**: Query transcriptions with SQL
-- **Streamlit Dashboard**: Optional web interface for results
+- **Streamlit Dashboard**: Web interface with CSV/SRT export
 
 ## 🏗️ Architecture
 
@@ -158,13 +159,23 @@ ORDER BY FILE_COUNT DESC;
 
 ## 🔧 Configuration
 
-### Whisper Model Options
+### Configuration Options
 
-Edit the notebook to change the Whisper model:
+All configuration is in **Cell 4** of the notebook. Edit these values before running:
 
 ```python
-# Options: tiny, base, small, medium, large
-model = whisper.load_model("base")  # Change this line
+# Whisper Model Selection
+WHISPER_MODEL = "base"  # Options: tiny, base, small, medium, large
+
+# Speaker Diarization
+ENABLE_SPEAKER_DIARIZATION = False  # Set to True to enable
+
+# Deduplication
+SKIP_ALREADY_TRANSCRIBED = True  # Skip files already in database
+FORCE_RETRANSCRIBE = False  # Re-process all files regardless
+
+# Batch Processing
+PROGRESS_UPDATE_INTERVAL = 5  # Progress updates frequency
 ```
 
 **Model Comparison:**
