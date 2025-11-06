@@ -1,0 +1,10 @@
+{
+  "account": "YOUR_ACCOUNT_IDENTIFIER",
+  "user": "AV_UPLOADER_SERVICE_USER",
+  "warehouse": "TRANSCRIPTION_WH",
+  "database": "TRANSCRIPTION_DB",
+  "schema": "TRANSCRIPTION_SCHEMA",
+  "role": "AV_UPLOADER_SERVICE_ROLE",
+  "stage": "AUDIO_VIDEO_STAGE"
+}
+

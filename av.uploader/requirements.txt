@@ -1,0 +1,4 @@
+# Python dependencies for Snowflake AV file uploader
+snowflake-connector-python>=3.0.0
+cryptography>=41.0.0
+

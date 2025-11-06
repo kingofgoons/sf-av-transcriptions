@@ -4,3 +4,26 @@ AUDIO_VIDEO_STAGE_FILES/**
 
 # Exclude examples folder
 examples.to.use/
+
+# Exclude RSA key files (private keys should never be committed)
+rsa_key.p8
+rsa_key.pub
+*.pem
+*.p8
+
+# Exclude configuration files with credentials
+av.uploader/config.json
+**/config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
