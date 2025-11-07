@@ -169,7 +169,8 @@ def upload_file(conn, local_file, stage_name):
         abs_path = os.path.abspath(local_file)
         
         # PUT command to upload file (no compression for media files)
-        put_sql = f"PUT file://{abs_path} @{stage_name} AUTO_COMPRESS=FALSE OVERWRITE=FALSE"
+        # Note: Wrap file path in single quotes to handle spaces and special characters
+        put_sql = f"PUT 'file://{abs_path}' @{stage_name} AUTO_COMPRESS=FALSE OVERWRITE=FALSE"
         
         cursor.execute(put_sql)
         result = cursor.fetchone()
