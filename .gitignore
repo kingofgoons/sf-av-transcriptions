@@ -1,3 +1,7 @@
+# macOS system files
+.DS_Store
+**/.DS_Store
+
 # Exclude Snowflake stage files
 AUDIO_VIDEO_STAGE_FILES/**
 !AUDIO_VIDEO_STAGE_FILES/.gitkeep
