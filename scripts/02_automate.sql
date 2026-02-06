@@ -30,7 +30,7 @@ USE WAREHOUSE TRANSCRIPTION_WH;
 
 -- Step 1: Create a stream directly on the stage
 -- This captures changes (new files added) to the stage
--- Note: The stage already has a directory table enabled (DIRECTORY = ENABLE = TRUE in setup.sql)
+-- Note: The stage already has a directory table enabled (DIRECTORY = ENABLE = TRUE in 01_setup.sql)
 CREATE OR REPLACE STREAM AV_STAGE_STREAM
     ON STAGE TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.AUDIO_VIDEO_STAGE;
 

@@ -4,9 +4,9 @@
 # Uploads the notebook file to stage and updates the live version
 #
 # Usage:
-#   ./deploy_notebook.sh              # Deploy using default connection (DEMO)
-#   ./deploy_notebook.sh --safe       # Suspend tasks during deployment
-#   SNOW_CONNECTION=myconn ./deploy_notebook.sh  # Use specific connection
+#   ./03_deploy_notebook.sh              # Deploy using default connection (DEMO)
+#   ./03_deploy_notebook.sh --safe       # Suspend tasks during deployment
+#   SNOW_CONNECTION=myconn ./03_deploy_notebook.sh  # Use specific connection
 #
 
 set -e

@@ -66,7 +66,7 @@ This project provides a scalable transcription pipeline that:
 
 1. Run the setup script in Snowflake:
 ```sql
--- Execute the contents of scripts/setup.sql
+-- Execute the contents of scripts/01_setup.sql
 ```
 
 2. Upload your audio/video files to the `AUDIO_VIDEO_STAGE`:
@@ -94,7 +94,7 @@ snow stage copy "*.mp4" @TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.AUDIO_VIDEO_STAGE
 
 ### Step 3: Create and Run Notebook
 
-The notebook is already created by `setup.sql` as `TRANSCRIBE_AV_FILES`. If you need to recreate it:
+The notebook is already created by `01_setup.sql` as `TRANSCRIBE_AV_FILES`. If you need to recreate it:
 
 ```sql
 -- Create the notebook object
@@ -121,7 +121,7 @@ ALTER NOTEBOOK TRANSCRIBE_AV_FILES SET EXTERNAL_ACCESS_INTEGRATIONS = (
 3. Monitor progress in the notebook output
 
 **Option B: Automated Execution (Recommended)**
-1. Run the automation setup: `scripts/automate.transcriptions.sql`
+1. Run the automation setup: `scripts/02_automate.sql`
 2. Upload files using Snowflake CLI or Snowsight
 3. Files are automatically transcribed within 5 minutes
 4. Monitor with the provided verification queries
@@ -260,7 +260,7 @@ For fully automated transcription pipeline, run the automation setup script:
 ```sql
 -- Execute the complete automation setup
 -- This script creates streams, tasks, and stored procedures
--- See: scripts/automate.transcriptions.sql
+-- See: scripts/02_automate.sql
 ```
 
 **What the automation script does:**
@@ -374,9 +374,11 @@ for i in range(0, len(media_files), batch_size):
 ```
 audio-video-transcription-snowflake/
 ├── scripts/
-│   ├── setup.sql                      # Snowflake database setup
-│   ├── automate.transcriptions.sql    # Automated pipeline with streams & tasks
-│   └── install_ffmpeg.sh              # FFmpeg installation (optional, usually pre-installed)
+│   ├── 01_setup.sql                  # Snowflake database setup
+│   ├── 02_automate.sql               # Automated pipeline with streams & tasks
+│   ├── 03_deploy_notebook.sh         # Deploy notebook from local to Snowflake
+│   ├── 04_teardown.sql               # Remove all project objects
+│   └── install_ffmpeg.sh             # FFmpeg installation (optional, usually pre-installed)
 ├── notebooks/
 │   └── audio_video_transcription.ipynb  # Main transcription notebook
 ├── streamlit/
