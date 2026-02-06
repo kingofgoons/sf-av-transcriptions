@@ -19,6 +19,9 @@ rsa_key.pub
 av.uploader/config.json
 **/config.json
 
+# Cortex Code local files
+.cortex/
+
 # Python
 __pycache__/
 *.py[cod]
