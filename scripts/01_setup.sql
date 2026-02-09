@@ -80,7 +80,10 @@ CREATE OR REPLACE TABLE TRANSCRIPTION_RESULTS (
     TRANSCRIPTION_TIMESTAMP TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     FILE_SIZE_BYTES NUMBER,
     AUDIO_DURATION_SECONDS FLOAT,
-    SPEAKER_COUNT NUMBER  -- Number of identified speakers
+    SPEAKER_COUNT NUMBER,              -- Number of identified speakers
+    SRT_CONTENT TEXT,                  -- Pre-generated SRT (without speakers)
+    SRT_WITH_SPEAKERS TEXT,            -- Pre-generated SRT (with speakers)  
+    SUMMARY_MARKDOWN TEXT              -- AI-generated summary with follow-ups
 );
 
 -- Create a view for easy querying

@@ -95,6 +95,9 @@ def load_transcription_data(session, limit=1000):
         PROCESSING_TIME_SECONDS,
         FILE_SIZE_BYTES,
         AUDIO_DURATION_SECONDS,
+        SRT_CONTENT,
+        SRT_WITH_SPEAKERS,
+        SUMMARY_MARKDOWN,
         TRANSCRIPTION_TIMESTAMP
     FROM TRANSCRIPTION_RESULTS 
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
@@ -1129,28 +1132,72 @@ def main():
                 # Export button
                 st.markdown("**📥 Export Options:**")
                 
-                # Load speaker segments for export
-                speaker_segments = get_speaker_segments(session, selected_file)
+                # Clean filename for download
+                clean_filename = re.sub(r'[^\w\-_\.]', '_', selected_file)
                 
-                if speaker_segments:
-                    file_info = {
-                        'filename': selected_file,
-                        'duration': file_row['AUDIO_DURATION_SECONDS'],
-                        'language': file_row['DETECTED_LANGUAGE']
-                    }
-                    
-                    # Clean filename for download
-                    clean_filename = re.sub(r'[^\w\-_\.]', '_', selected_file)
-                    
-                    # Export buttons in columns
-                    export_col1, export_col2, export_col3 = st.columns(3)
-                    
-                    with export_col1:
+                # Get pre-computed content from database
+                srt_content = file_row.get('SRT_CONTENT')
+                srt_with_speakers = file_row.get('SRT_WITH_SPEAKERS')
+                summary_markdown = file_row.get('SUMMARY_MARKDOWN')
+                
+                # Export buttons in columns - now with 4 columns for markdown
+                export_col1, export_col2, export_col3, export_col4 = st.columns(4)
+                
+                with export_col1:
+                    # Use pre-computed SRT without speakers
+                    if srt_content and pd.notna(srt_content):
+                        srt_filename = f"transcript_{clean_filename}.srt"
+                        st.download_button(
+                            label="📥 SRT",
+                            data=srt_content,
+                            file_name=srt_filename,
+                            mime="application/x-subrip",
+                            help="Download as SRT subtitles"
+                        )
+                    else:
+                        st.caption("SRT N/A")
+                
+                with export_col2:
+                    # Use pre-computed SRT with speakers
+                    if srt_with_speakers and pd.notna(srt_with_speakers):
+                        srt_filename_speakers = f"transcript_{clean_filename}_speakers.srt"
+                        st.download_button(
+                            label="📥 SRT+",
+                            data=srt_with_speakers,
+                            file_name=srt_filename_speakers,
+                            mime="application/x-subrip",
+                            help="Download as SRT with speaker labels"
+                        )
+                    else:
+                        st.caption("SRT+ N/A")
+                
+                with export_col3:
+                    # Markdown summary download
+                    if summary_markdown and pd.notna(summary_markdown):
+                        md_filename = f"summary_{clean_filename}.md"
+                        st.download_button(
+                            label="📥 Summary",
+                            data=summary_markdown,
+                            file_name=md_filename,
+                            mime="text/markdown",
+                            help="Download AI-generated summary"
+                        )
+                    else:
+                        st.caption("Summary N/A")
+                
+                with export_col4:
+                    # CSV export (still dynamically generated from speaker segments)
+                    speaker_segments = get_speaker_segments(session, selected_file)
+                    if speaker_segments:
+                        file_info = {
+                            'filename': selected_file,
+                            'duration': file_row['AUDIO_DURATION_SECONDS'],
+                            'language': file_row['DETECTED_LANGUAGE']
+                        }
                         csv_df = convert_speaker_segments_to_csv(speaker_segments, file_info)
                         if csv_df is not None:
                             csv_string = create_csv_download(csv_df, selected_file)
                             download_filename = f"transcript_{clean_filename}.csv"
-                            
                             st.download_button(
                                 label="📥 CSV",
                                 data=csv_string,
@@ -1159,70 +1206,14 @@ def main():
                                 help="Download as CSV spreadsheet"
                             )
                         else:
-                            st.warning("CSV unavailable")
-                    
-                    with export_col2:
-                        # SRT with speakers
-                        srt_content_with_speakers = convert_speaker_segments_to_srt(speaker_segments, file_info, include_speakers=True)
-                        if srt_content_with_speakers:
-                            srt_filename = f"transcript_{clean_filename}.srt"
-                            
-                            st.download_button(
-                                label="📥 SRT (With Speakers)",
-                                data=srt_content_with_speakers,
-                                file_name=srt_filename,
-                                mime="application/x-subrip",
-                                help="Download as SRT with speaker labels"
-                            )
-                        else:
-                            st.warning("SRT unavailable")
-                    
-                    with export_col3:
-                        # SRT without speakers
-                        srt_content_no_speakers = convert_speaker_segments_to_srt(speaker_segments, file_info, include_speakers=False)
-                        if srt_content_no_speakers:
-                            srt_filename_no_speakers = f"transcript_{clean_filename}_no_speakers.srt"
-                            
-                            st.download_button(
-                                label="📥 SRT (No Speakers)",
-                                data=srt_content_no_speakers,
-                                file_name=srt_filename_no_speakers,
-                                mime="application/x-subrip",
-                                help="Download as SRT without speaker labels"
-                            )
-                        else:
-                            st.warning("SRT unavailable")
-                    
-                    # Format preview expander
-                    with st.expander("📋 Format Preview"):
-                        st.markdown("**SRT with Speakers:**")
-                        st.code("""1
-00:00:15,200 --> 00:00:32,100
-Speaker_0: Welcome to today's meeting...
-
-2
-00:00:33,000 --> 00:00:45,200
-Speaker_1: Thank you for having me here...""")
-                        
-                        st.markdown("**SRT without Speakers:**")
-                        st.code("""1
-00:00:15,200 --> 00:00:32,100
-Welcome to today's meeting...
-
-2
-00:00:33,000 --> 00:00:45,200
-Thank you for having me here...""")
-                        
-                        st.markdown("**CSV Preview:**")
-                        st.markdown("Columns: Segment, Speaker, Start_Time, End_Time, Start_Seconds, End_Seconds, Duration_Seconds, Text")
-                        
-                        if csv_df is not None and len(csv_df) > 5:
-                            # Skip metadata rows for preview
-                            data_rows = csv_df[csv_df['Segment'] != 'METADATA'].head(3)
-                            if not data_rows.empty:
-                                st.dataframe(data_rows[['Segment', 'Speaker', 'Start_Time', 'End_Time', 'Text']])
-                else:
-                    st.info("No speaker segments available for export")
+                            st.caption("CSV N/A")
+                    else:
+                        st.caption("CSV N/A")
+            
+            # Summary preview section
+            if summary_markdown and pd.notna(summary_markdown):
+                with st.expander("📋 AI-Generated Summary", expanded=False):
+                    st.markdown(summary_markdown)
             
             st.divider()
             
