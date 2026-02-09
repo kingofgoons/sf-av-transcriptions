@@ -3,8 +3,10 @@
 -- =====================================================
 -- This script removes all Snowflake objects created by this project.
 -- 
--- USAGE: Uncomment the section(s) you want to execute.
---        Each level includes all previous levels.
+-- USAGE: 
+--   1. Update the configuration variables below (or copy from 00_config.sql)
+--   2. Uncomment the section(s) you want to execute.
+--   Each level includes all previous levels.
 --
 -- LEVELS:
 --   Level 1: Reset automation (tasks, stream, procedure)
@@ -16,11 +18,41 @@
 --          after the retention period expires.
 -- =====================================================
 
+--#############################################################################
+-- IMPORTANT: Copy and paste the configuration block from 00_config.sql here
+-- before running this script. This allows you to teardown parallel instances.
+--#############################################################################
+
+-- Core naming - change these to teardown a specific deployment
+SET PROJECT_DB = 'TRANSCRIPTION_DB';              -- Database name
+SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';      -- Schema name
+SET PROJECT_WH = 'TRANSCRIPTION_WH';              -- Warehouse name
+SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL';  -- GPU compute pool name
+
+-- Derived names (automatically built from above)
+SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES';     -- Notebook name
+SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
+SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets
+SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
+SET PROJECT_STREAM = 'AV_STAGE_STREAM';           -- Stream for file detection
+SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK';  -- Transcription task
+SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK';  -- Stage refresh task
+
+-- Integration names (these are account-level, so include prefix to avoid conflicts)
+SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration';
+SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration';
+SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule';
+SET PROJECT_PYPI_RULE = 'pypi_network_rule';
+
+--#############################################################################
+-- END CONFIGURATION
+--#############################################################################
+
 -- Set context
 USE ROLE SYSADMIN;
-USE DATABASE TRANSCRIPTION_DB;
-USE SCHEMA TRANSCRIPTION_SCHEMA;
-USE WAREHOUSE TRANSCRIPTION_WH;
+USE DATABASE IDENTIFIER($PROJECT_DB);
+USE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+USE WAREHOUSE IDENTIFIER($PROJECT_WH);
 
 -- =====================================================
 -- LEVEL 1: RESET AUTOMATION
@@ -32,23 +64,23 @@ USE WAREHOUSE TRANSCRIPTION_WH;
 
 /*
 -- Suspend tasks first (required before dropping)
-ALTER TASK IF EXISTS TRANSCRIBE_NEW_FILES_TASK SUSPEND;
-ALTER TASK IF EXISTS REFRESH_STAGE_DIRECTORY_TASK SUSPEND;
+ALTER TASK IF EXISTS IDENTIFIER($PROJECT_TASK_TRANSCRIBE) SUSPEND;
+ALTER TASK IF EXISTS IDENTIFIER($PROJECT_TASK_REFRESH) SUSPEND;
 
 -- Drop tasks
-DROP TASK IF EXISTS TRANSCRIBE_NEW_FILES_TASK;
-DROP TASK IF EXISTS REFRESH_STAGE_DIRECTORY_TASK;
+DROP TASK IF EXISTS IDENTIFIER($PROJECT_TASK_TRANSCRIBE);
+DROP TASK IF EXISTS IDENTIFIER($PROJECT_TASK_REFRESH);
 
 -- Drop stream
-DROP STREAM IF EXISTS AV_STAGE_STREAM;
+DROP STREAM IF EXISTS IDENTIFIER($PROJECT_STREAM);
 
 -- Drop stored procedure
 DROP PROCEDURE IF EXISTS RUN_TRANSCRIPTION_NOTEBOOK();
 
 -- Verify Level 1 cleanup
 SELECT 'Level 1 Complete' AS status;
-SHOW TASKS LIKE '%TRANSCRI%' IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
-SHOW STREAMS LIKE '%AV_STAGE%' IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
+SHOW TASKS IN SCHEMA;
+SHOW STREAMS IN SCHEMA;
 */
 
 -- =====================================================
@@ -63,28 +95,30 @@ SHOW STREAMS LIKE '%AV_STAGE%' IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
 -- First run Level 1 above, then:
 
 -- Drop notebook
-DROP NOTEBOOK IF EXISTS TRANSCRIBE_AV_FILES;
+DROP NOTEBOOK IF EXISTS IDENTIFIER($PROJECT_NOTEBOOK);
 
 -- Switch to ACCOUNTADMIN for compute pool and integrations
 USE ROLE ACCOUNTADMIN;
 
 -- Stop and drop compute pool
-ALTER COMPUTE POOL IF EXISTS TRANSCRIPTION_GPU_POOL STOP ALL;
-DROP COMPUTE POOL IF EXISTS TRANSCRIPTION_GPU_POOL;
+ALTER COMPUTE POOL IF EXISTS IDENTIFIER($PROJECT_COMPUTE_POOL) STOP ALL;
+DROP COMPUTE POOL IF EXISTS IDENTIFIER($PROJECT_COMPUTE_POOL);
 
 -- Drop external access integrations
-DROP INTEGRATION IF EXISTS TRANSCRIPTION_PYPI_ACCESS_INTEGRATION;
-DROP INTEGRATION IF EXISTS TRANSCRIPTION_ALLOW_ALL_INTEGRATION;
+DROP INTEGRATION IF EXISTS IDENTIFIER($PROJECT_PYPI_INTEGRATION);
+DROP INTEGRATION IF EXISTS IDENTIFIER($PROJECT_ALLOW_ALL_INTEGRATION);
 
 -- Drop network rules (back to SYSADMIN)
 USE ROLE SYSADMIN;
-DROP NETWORK RULE IF EXISTS TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.pypi_network_rule;
-DROP NETWORK RULE IF EXISTS TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.allow_all_rule;
+USE DATABASE IDENTIFIER($PROJECT_DB);
+USE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+DROP NETWORK RULE IF EXISTS IDENTIFIER($PROJECT_PYPI_RULE);
+DROP NETWORK RULE IF EXISTS IDENTIFIER($PROJECT_ALLOW_ALL_RULE);
 
 -- Verify Level 2 cleanup
 SELECT 'Level 2 Complete' AS status;
-SHOW NOTEBOOKS LIKE '%TRANSCRI%' IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
-SHOW COMPUTE POOLS LIKE '%TRANSCRI%';
+SHOW NOTEBOOKS IN SCHEMA;
+SHOW COMPUTE POOLS;
 */
 
 -- =====================================================
@@ -100,27 +134,27 @@ SHOW COMPUTE POOLS LIKE '%TRANSCRI%';
 -- First run Levels 1-2 above, then:
 
 USE ROLE SYSADMIN;
-USE DATABASE TRANSCRIPTION_DB;
-USE SCHEMA TRANSCRIPTION_SCHEMA;
+USE DATABASE IDENTIFIER($PROJECT_DB);
+USE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
 
 -- Drop view first (depends on table)
 DROP VIEW IF EXISTS TRANSCRIPTION_SUMMARY;
 
 -- Drop results table (YOUR TRANSCRIPTION DATA)
-DROP TABLE IF EXISTS TRANSCRIPTION_RESULTS;
+DROP TABLE IF EXISTS IDENTIFIER($PROJECT_RESULTS_TABLE);
 
 -- Drop file format
 DROP FILE FORMAT IF EXISTS CSVFORMAT;
 
 -- Drop stages (YOUR UPLOADED FILES)
 -- WARNING: This deletes all files in the stages!
-DROP STAGE IF EXISTS NOTEBOOK_STAGE;
-DROP STAGE IF EXISTS AUDIO_VIDEO_STAGE;
+DROP STAGE IF EXISTS IDENTIFIER($PROJECT_STAGE_NB);
+DROP STAGE IF EXISTS IDENTIFIER($PROJECT_STAGE_AV);
 
 -- Verify Level 3 cleanup
 SELECT 'Level 3 Complete' AS status;
-SHOW TABLES LIKE '%TRANSCRI%' IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
-SHOW STAGES IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
+SHOW TABLES IN SCHEMA;
+SHOW STAGES IN SCHEMA;
 */
 
 -- =====================================================
@@ -137,18 +171,19 @@ SHOW STAGES IN SCHEMA TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
 USE ROLE SYSADMIN;
 
 -- Drop schema (should be empty after Level 3)
-DROP SCHEMA IF EXISTS TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA;
+EXECUTE IMMEDIATE 'DROP SCHEMA IF EXISTS ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA;
 
 -- Drop database
-DROP DATABASE IF EXISTS TRANSCRIPTION_DB;
+DROP DATABASE IF EXISTS IDENTIFIER($PROJECT_DB);
 
 -- Drop warehouse
-DROP WAREHOUSE IF EXISTS TRANSCRIPTION_WH;
+DROP WAREHOUSE IF EXISTS IDENTIFIER($PROJECT_WH);
 
 -- Verify Level 4 cleanup
 SELECT 'Level 4 Complete - Full Teardown' AS status;
-SHOW DATABASES LIKE 'TRANSCRIPTION_DB';
-SHOW WAREHOUSES LIKE 'TRANSCRIPTION_WH';
+-- Note: Can't use IDENTIFIER() in SHOW LIKE, use actual names or omit LIKE clause
+SHOW DATABASES;
+SHOW WAREHOUSES;
 */
 
 -- =====================================================
@@ -163,11 +198,11 @@ SHOW WAREHOUSES LIKE 'TRANSCRIPTION_WH';
 -- =====================================================
 /*
 -- Undrop database (restores everything inside it)
-UNDROP DATABASE TRANSCRIPTION_DB;
+UNDROP DATABASE IDENTIFIER($PROJECT_DB);
 
--- Undrop individual objects
-UNDROP TABLE TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.TRANSCRIPTION_RESULTS;
-UNDROP STAGE TRANSCRIPTION_DB.TRANSCRIPTION_SCHEMA.AUDIO_VIDEO_STAGE;
+-- Undrop individual objects (use dynamic SQL for fully qualified names)
+EXECUTE IMMEDIATE 'UNDROP TABLE ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_RESULTS_TABLE;
+EXECUTE IMMEDIATE 'UNDROP STAGE ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_AV;
 
 -- Check retention settings
 SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN ACCOUNT;
@@ -178,28 +213,28 @@ SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN ACCOUNT;
 -- =====================================================
 /*
 Level 1 - Automation:
-  - TRANSCRIBE_NEW_FILES_TASK
-  - REFRESH_STAGE_DIRECTORY_TASK
-  - AV_STAGE_STREAM
+  - $PROJECT_TASK_TRANSCRIBE (task)
+  - $PROJECT_TASK_REFRESH (task)
+  - $PROJECT_STREAM (stream)
   - RUN_TRANSCRIPTION_NOTEBOOK (procedure)
 
 Level 2 - Compute:
-  - TRANSCRIBE_AV_FILES (notebook)
-  - TRANSCRIPTION_GPU_POOL
-  - TRANSCRIPTION_PYPI_ACCESS_INTEGRATION
-  - TRANSCRIPTION_ALLOW_ALL_INTEGRATION
-  - pypi_network_rule
-  - allow_all_rule
+  - $PROJECT_NOTEBOOK (notebook)
+  - $PROJECT_COMPUTE_POOL (compute pool)
+  - $PROJECT_PYPI_INTEGRATION (integration)
+  - $PROJECT_ALLOW_ALL_INTEGRATION (integration)
+  - $PROJECT_PYPI_RULE (network rule)
+  - $PROJECT_ALLOW_ALL_RULE (network rule)
 
 Level 3 - Data:
-  - TRANSCRIPTION_RESULTS (table)
+  - $PROJECT_RESULTS_TABLE (table)
   - TRANSCRIPTION_SUMMARY (view)
   - CSVFORMAT (file format)
-  - NOTEBOOK_STAGE
-  - AUDIO_VIDEO_STAGE
+  - $PROJECT_STAGE_NB (stage)
+  - $PROJECT_STAGE_AV (stage)
 
 Level 4 - Infrastructure:
-  - TRANSCRIPTION_SCHEMA
-  - TRANSCRIPTION_DB
-  - TRANSCRIPTION_WH
+  - $PROJECT_SCHEMA (schema)
+  - $PROJECT_DB (database)
+  - $PROJECT_WH (warehouse)
 */
