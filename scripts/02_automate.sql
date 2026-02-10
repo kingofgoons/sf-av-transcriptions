@@ -66,20 +66,22 @@ SET FQ_NOTEBOOK = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_NOTEB
 -- Step 1: Create a stream directly on the stage
 -- This captures changes (new files added) to the stage
 -- Note: The stage already has a directory table enabled (DIRECTORY = ENABLE = TRUE in 01_setup.sql)
-EXECUTE IMMEDIATE
-    'CREATE OR REPLACE STREAM ' || $PROJECT_STREAM || '
-     ON STAGE ' || $FQ_STAGE_AV;
+SET SQL_CMD = 'CREATE OR REPLACE STREAM ' || $PROJECT_STREAM || ' ON STAGE ' || $FQ_STAGE_AV;
+EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Step 2: Refresh the stage directory table to capture current files
 -- This populates the directory table metadata with existing files
-EXECUTE IMMEDIATE
-    'ALTER STAGE ' || $FQ_STAGE_AV || ' REFRESH';
+SET SQL_CMD = 'ALTER STAGE ' || $FQ_STAGE_AV || ' REFRESH';
+EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Step 3: Create a stored procedure to execute the notebook
 -- Using a stored procedure with EXECUTE AS OWNER ensures proper privileges
 -- Note: EXECUTE NOTEBOOK is asynchronous - it starts the notebook but doesn't wait for completion
-EXECUTE IMMEDIATE
-    'CREATE OR REPLACE PROCEDURE RUN_TRANSCRIPTION_NOTEBOOK()
+-- Using anonymous block because SQL exceeds 256-byte session variable limit
+DECLARE
+    sql_cmd VARCHAR;
+BEGIN
+    sql_cmd := 'CREATE OR REPLACE PROCEDURE RUN_TRANSCRIPTION_NOTEBOOK()
         RETURNS STRING
         LANGUAGE SQL
         EXECUTE AS OWNER
@@ -87,7 +89,6 @@ EXECUTE IMMEDIATE
     DECLARE
         result STRING;
     BEGIN
-        -- Execute the transcription notebook (asynchronous operation)
         EXECUTE NOTEBOOK ' || $FQ_NOTEBOOK || '();
         result := ''Notebook execution initiated at '' || CURRENT_TIMESTAMP()::STRING;
         RETURN result;
@@ -95,33 +96,37 @@ EXECUTE IMMEDIATE
         WHEN OTHER THEN
             RETURN ''Error executing notebook: '' || SQLERRM;
     END';
+    EXECUTE IMMEDIATE sql_cmd;
+END;
 
 -- Step 4: Create a task to execute the notebook when new files are detected
-EXECUTE IMMEDIATE
-    'CREATE OR REPLACE TASK ' || $PROJECT_TASK_TRANSCRIBE || '
+-- Using anonymous block because SQL exceeds 256-byte session variable limit
+DECLARE
+    sql_cmd VARCHAR;
+    fq_proc VARCHAR;
+BEGIN
+    fq_proc := $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.RUN_TRANSCRIPTION_NOTEBOOK';
+    sql_cmd := 'CREATE OR REPLACE TASK ' || $PROJECT_TASK_TRANSCRIBE || '
         WAREHOUSE = ' || $PROJECT_WH || '
         SCHEDULE = ''5 MINUTE''
         WHEN SYSTEM$STREAM_HAS_DATA(''' || $FQ_STREAM || ''')
     AS
-        CALL ' || $FQ_NOTEBOOK || '.RUN_TRANSCRIPTION_NOTEBOOK()';
-
--- Actually the procedure is in the schema, not notebook. Fix:
-EXECUTE IMMEDIATE
-    'CREATE OR REPLACE TASK ' || $PROJECT_TASK_TRANSCRIBE || '
-        WAREHOUSE = ' || $PROJECT_WH || '
-        SCHEDULE = ''5 MINUTE''
-        WHEN SYSTEM$STREAM_HAS_DATA(''' || $FQ_STREAM || ''')
-    AS
-        CALL ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.RUN_TRANSCRIPTION_NOTEBOOK()';
+        CALL ' || fq_proc || '()';
+    EXECUTE IMMEDIATE sql_cmd;
+END;
 
 -- Step 5: Create a task to refresh the stage directory periodically
 -- This ensures new files uploaded to the stage are detected
-EXECUTE IMMEDIATE
-    'CREATE OR REPLACE TASK ' || $PROJECT_TASK_REFRESH || '
+DECLARE
+    sql_cmd VARCHAR;
+BEGIN
+    sql_cmd := 'CREATE OR REPLACE TASK ' || $PROJECT_TASK_REFRESH || '
         WAREHOUSE = ' || $PROJECT_WH || '
         SCHEDULE = ''5 MINUTE''
     AS
         ALTER STAGE ' || $FQ_STAGE_AV || ' REFRESH';
+    EXECUTE IMMEDIATE sql_cmd;
+END;
 
 -- Step 6: Resume the tasks to activate them (run these manually after granting privileges)
 ALTER TASK IDENTIFIER($PROJECT_TASK_REFRESH) RESUME;
@@ -136,8 +141,8 @@ SELECT SYSTEM$STREAM_HAS_DATA($FQ_STREAM);
 
 -- View current files in the stage (query the stage's built-in directory table)
 -- Note: Dynamic SQL needed for DIRECTORY() function
-EXECUTE IMMEDIATE
-    'SELECT * FROM DIRECTORY(@' || $FQ_STAGE_AV || ') ORDER BY LAST_MODIFIED DESC';
+SET SQL_CMD = 'SELECT * FROM DIRECTORY(@' || $FQ_STAGE_AV || ') ORDER BY LAST_MODIFIED DESC';
+EXECUTE IMMEDIATE $SQL_CMD;
 
 -- View stream metadata to see what files are pending processing
 SELECT * FROM IDENTIFIER($PROJECT_STREAM);
