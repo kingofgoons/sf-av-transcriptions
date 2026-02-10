@@ -5,25 +5,25 @@
 --#############################################################################
 
 -- Core naming - change these to create a parallel deployment
-SET PROJECT_DB = 'TRANSCRIPTION_DB';              -- Database name
-SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';      -- Schema name
-SET PROJECT_WH = 'TRANSCRIPTION_WH';              -- Warehouse name
-SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL';  -- GPU compute pool name
+SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name
+SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA_V2';      -- Schema name
+SET PROJECT_WH = 'TRANSCRIPTION_WH_V2';              -- Warehouse name
+SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL_V2';  -- GPU compute pool name
 
 -- Derived names (automatically built from above)
-SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES';     -- Notebook name
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
-SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
-SET PROJECT_STREAM = 'AV_STAGE_STREAM';           -- Stream for file detection
-SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK';  -- Transcription task
-SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK';  -- Stage refresh task
+SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES_V2';     -- Notebook name
+SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_STREAM = 'AV_STAGE_STREAM_V2';           -- Stream for file detection
+SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK_V2';  -- Transcription task
+SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh task
 
 -- Integration names (these are account-level, so include prefix to avoid conflicts)
-SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration';
-SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration';
-SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule';
-SET PROJECT_PYPI_RULE = 'pypi_network_rule';
+SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration_V2';
+SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration_V2';
+SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule_V2';
+SET PROJECT_PYPI_RULE = 'pypi_network_rule_V2';
 
 --#############################################################################
 -- Example: To create a DEV instance, change the top values:

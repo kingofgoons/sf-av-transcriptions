@@ -4,22 +4,25 @@
 --#############################################################################
 
 -- Core naming - change these to create a parallel deployment
-SET PROJECT_DB = 'TRANSCRIPTION_DB';              -- Database name
-SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';      -- Schema name
-SET PROJECT_WH = 'TRANSCRIPTION_WH';              -- Warehouse name
-SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL';  -- GPU compute pool name
+SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name
+SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA_V2';      -- Schema name
+SET PROJECT_WH = 'TRANSCRIPTION_WH_V2';              -- Warehouse name
+SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL_V2';  -- GPU compute pool name
 
 -- Derived names (automatically built from above)
-SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES';     -- Notebook name
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
-SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
+SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES_V2';     -- Notebook name
+SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_STREAM = 'AV_STAGE_STREAM_V2';           -- Stream for file detection
+SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK_V2';  -- Transcription task
+SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh task
 
 -- Integration names (these are account-level, so include prefix to avoid conflicts)
-SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration';
-SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration';
-SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule';
-SET PROJECT_PYPI_RULE = 'pypi_network_rule';
+SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration_V2';
+SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration_V2';
+SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule_V2';
+SET PROJECT_PYPI_RULE = 'pypi_network_rule_V2';
 
 --#############################################################################
 -- END CONFIGURATION
@@ -58,18 +61,21 @@ CREATE OR REPLACE NETWORK RULE IDENTIFIER($PROJECT_ALLOW_ALL_RULE)
           MODE = EGRESS
           VALUE_LIST = ('0.0.0.0:443','0.0.0.0:80');
 
-CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION IDENTIFIER($PROJECT_ALLOW_ALL_INTEGRATION)
-        ALLOWED_NETWORK_RULES = (IDENTIFIER($PROJECT_ALLOW_ALL_RULE))
-        ENABLED = TRUE;
+-- Use dynamic SQL for integrations (IDENTIFIER() not supported in ALLOWED_NETWORK_RULES)
+SET FQ_ALLOW_ALL_RULE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_ALLOW_ALL_RULE;
+SET SQL_CMD = 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || $PROJECT_ALLOW_ALL_INTEGRATION || 
+              ' ALLOWED_NETWORK_RULES = (' || $FQ_ALLOW_ALL_RULE || ') ENABLED = TRUE';
+EXECUTE IMMEDIATE $SQL_CMD;
 
 CREATE OR REPLACE NETWORK RULE IDENTIFIER($PROJECT_PYPI_RULE)
           TYPE = HOST_PORT
           MODE = EGRESS
           VALUE_LIST = ('pypi.org', 'pypi.python.org', 'pythonhosted.org', 'files.pythonhosted.org');
 
-CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION IDENTIFIER($PROJECT_PYPI_INTEGRATION)
-        ALLOWED_NETWORK_RULES = (IDENTIFIER($PROJECT_PYPI_RULE))
-        ENABLED = TRUE;
+SET FQ_PYPI_RULE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_PYPI_RULE;
+SET SQL_CMD = 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || $PROJECT_PYPI_INTEGRATION || 
+              ' ALLOWED_NETWORK_RULES = (' || $FQ_PYPI_RULE || ') ENABLED = TRUE';
+EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Grant ownership to SYSADMIN
 GRANT OWNERSHIP ON COMPUTE POOL IDENTIFIER($PROJECT_COMPUTE_POOL) TO ROLE SYSADMIN;
@@ -114,8 +120,11 @@ CREATE OR REPLACE TABLE IDENTIFIER($PROJECT_RESULTS_TABLE) (
     SUMMARY_MARKDOWN TEXT              -- AI-generated summary with follow-ups
 );
 
--- Create a view for easy querying
-CREATE OR REPLACE VIEW TRANSCRIPTION_SUMMARY AS
+-- Create a view for easy querying (using dynamic SQL to resolve table name)
+DECLARE
+    view_sql VARCHAR;
+BEGIN
+    view_sql := 'CREATE OR REPLACE VIEW TRANSCRIPTION_SUMMARY AS
 SELECT 
     FILE_TYPE,
     DETECTED_LANGUAGE,
@@ -126,27 +135,33 @@ SELECT
     AVG(SPEAKER_COUNT) as AVG_SPEAKERS,
     MIN(TRANSCRIPTION_TIMESTAMP) as FIRST_TRANSCRIPTION,
     MAX(TRANSCRIPTION_TIMESTAMP) as LAST_TRANSCRIPTION
-FROM IDENTIFIER($PROJECT_RESULTS_TABLE)
+FROM ' || $PROJECT_RESULTS_TABLE || '
 GROUP BY FILE_TYPE, DETECTED_LANGUAGE
-ORDER BY FILE_COUNT DESC;
+ORDER BY FILE_COUNT DESC';
+    EXECUTE IMMEDIATE view_sql;
+END;
 
 -- Create notebook (uncomment after uploading notebook files)
--- Note: CREATE NOTEBOOK doesn't support IDENTIFIER() for stage paths, using dynamic SQL
-EXECUTE IMMEDIATE 
-    'CREATE OR REPLACE NOTEBOOK ' || $PROJECT_NOTEBOOK || '
-     FROM ''@' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_NB || '''
-     MAIN_FILE = ''audio_video_transcription.ipynb''
-     QUERY_WAREHOUSE = ''' || $PROJECT_WH || '''
-     COMPUTE_POOL=''' || $PROJECT_COMPUTE_POOL || '''
-     RUNTIME_NAME=''SYSTEM$GPU_RUNTIME''';
-
-ALTER NOTEBOOK IDENTIFIER($PROJECT_NOTEBOOK) ADD LIVE VERSION FROM LAST;
-
--- Set external access integrations using dynamic SQL (ALTER doesn't support IDENTIFIER for integration list)
-EXECUTE IMMEDIATE
-    'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' SET EXTERNAL_ACCESS_INTEGRATIONS = ("' || 
-    UPPER($PROJECT_PYPI_INTEGRATION) || '", "' || 
-    UPPER($PROJECT_ALLOW_ALL_INTEGRATION) || '")';
+-- Note: Using anonymous block because session variables have 256-byte limit
+DECLARE
+    sql_cmd VARCHAR;
+BEGIN
+    sql_cmd := 'CREATE OR REPLACE NOTEBOOK ' || $PROJECT_NOTEBOOK || 
+               ' FROM ''@' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_NB || '''' ||
+               ' MAIN_FILE = ''audio_video_transcription.ipynb''' ||
+               ' QUERY_WAREHOUSE = ''' || $PROJECT_WH || '''' ||
+               ' COMPUTE_POOL=''' || $PROJECT_COMPUTE_POOL || '''' ||
+               ' RUNTIME_NAME=''SYSTEM$GPU_RUNTIME''';
+    EXECUTE IMMEDIATE sql_cmd;
+    
+    sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' ADD LIVE VERSION FROM LAST';
+    EXECUTE IMMEDIATE sql_cmd;
+    
+    sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' SET EXTERNAL_ACCESS_INTEGRATIONS = ("' || 
+               UPPER($PROJECT_PYPI_INTEGRATION) || '", "' || 
+               UPPER($PROJECT_ALLOW_ALL_INTEGRATION) || '")';
+    EXECUTE IMMEDIATE sql_cmd;
+END;
 
 -- Sample queries to test after transcription:
 /*

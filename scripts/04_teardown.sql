@@ -31,9 +31,9 @@ SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL';  -- GPU compute pool name
 
 -- Derived names (automatically built from above)
 SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES';     -- Notebook name
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
-SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
+SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets -- DON'T UPDATE (hard-coded in notebook)
+SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table -- DON'T UPDATE (hard-coded in notebook)
 SET PROJECT_STREAM = 'AV_STAGE_STREAM';           -- Stream for file detection
 SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK';  -- Transcription task
 SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK';  -- Stage refresh task
@@ -171,7 +171,8 @@ SHOW STAGES IN SCHEMA;
 USE ROLE SYSADMIN;
 
 -- Drop schema (should be empty after Level 3)
-EXECUTE IMMEDIATE 'DROP SCHEMA IF EXISTS ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA;
+SET SQL_CMD = 'DROP SCHEMA IF EXISTS ' || $PROJECT_DB || '.' || $PROJECT_SCHEMA;
+EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Drop database
 DROP DATABASE IF EXISTS IDENTIFIER($PROJECT_DB);
