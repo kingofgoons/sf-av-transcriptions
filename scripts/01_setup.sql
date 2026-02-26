@@ -33,6 +33,14 @@ USE ROLE SYSADMIN;
 -- Create warehouse, database, and schema for transcription project
 CREATE OR REPLACE WAREHOUSE IDENTIFIER($PROJECT_WH); --by default, this creates an XS Standard Warehouse
 CREATE OR REPLACE DATABASE IDENTIFIER($PROJECT_DB);
+
+-- Increase data retention to 14 days to prevent streams from going stale.
+-- Default is 1 day, which is too short — if the stream isn't consumed within
+-- the retention window (e.g., task errors, warehouse suspension, or no new files),
+-- the stream's offset expires and it becomes permanently stale, requiring a
+-- manual recreate + backfill. 14 days provides a comfortable buffer.
+ALTER DATABASE IDENTIFIER($PROJECT_DB) SET DATA_RETENTION_TIME_IN_DAYS = 14;
+
 CREATE OR REPLACE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
 
 USE WAREHOUSE IDENTIFIER($PROJECT_WH);
