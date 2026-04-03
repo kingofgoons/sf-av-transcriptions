@@ -37,3 +37,6 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Snowflake CLI deploy artifacts
+output/

@@ -48,7 +48,7 @@ This project provides a scalable transcription pipeline that:
                                                          │
                                                          ▼
                        ┌──────────────────────────────────────────┐
-                       │  Snowflake Cortex LLM (mistral-large2)   │
+                       │  Snowflake Cortex LLM (claude-sonnet-4-6) │
                        │  • AI-powered meeting summaries          │
                        │  • Categorized follow-up items           │
                        └──────────────────────────────────────────┘

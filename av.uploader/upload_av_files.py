@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import glob
+import subprocess
 from pathlib import Path
 import snowflake.connector
 from cryptography.hazmat.backends import default_backend
@@ -325,6 +326,13 @@ def main():
     
     # Upload AV files
     upload_av_files(config, args.directory)
+
+    # Offer Gong sync
+    print()
+    answer = input("Sync Gong calls from Snowhouse → DEMO? [y/N] ").strip().lower()
+    if answer == 'y':
+        sync_script = Path(__file__).parent.parent / 'scripts' / '05_sync_gong.sh'
+        subprocess.run(['bash', str(sync_script)], cwd=sync_script.parent)
 
 
 if __name__ == "__main__":

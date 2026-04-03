@@ -98,7 +98,14 @@ def load_transcription_data(session, limit=1000):
         SRT_CONTENT,
         SRT_WITH_SPEAKERS,
         SUMMARY_MARKDOWN,
-        TRANSCRIPTION_TIMESTAMP
+        TRANSCRIPTION_TIMESTAMP,
+        MEETING_TITLE,
+        ACCOUNT_NAME,
+        CALL_START_TS,
+        KEY_POINTS,
+        NEXT_STEPS,
+        DECISIONS_MADE,
+        QUESTIONS_RAISED
     FROM TRANSCRIPTION_RESULTS 
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
     LIMIT {limit}
@@ -141,10 +148,14 @@ def get_summary_stats(session):
         # Average speakers per file
         result = session.sql("SELECT AVG(SPEAKER_COUNT) as avg_speakers FROM TRANSCRIPTION_RESULTS WHERE SPEAKER_COUNT > 0").to_pandas()
         stats['avg_speakers'] = result.iloc[0, 0] if not result.empty and result.iloc[0, 0] is not None else 0
+
+        # Distinct accounts
+        result = session.sql("SELECT COUNT(DISTINCT ACCOUNT_NAME) as count FROM TRANSCRIPTION_RESULTS WHERE ACCOUNT_NAME IS NOT NULL").to_pandas()
+        stats['account_count'] = result.iloc[0, 0] if not result.empty else 0
         
     except Exception as e:
         st.warning(f"Error getting statistics: {str(e)}")
-        stats = {'total_files': 0, 'total_duration': 0, 'avg_processing_time': 0, 'languages': 0, 'files_with_speakers': 0, 'avg_speakers': 0}
+        stats = {'total_files': 0, 'total_duration': 0, 'avg_processing_time': 0, 'languages': 0, 'files_with_speakers': 0, 'avg_speakers': 0, 'account_count': 0}
     
     return stats
 
@@ -185,18 +196,21 @@ def get_speaker_segments(session, file_name):
         st.error(f"Error loading speaker segments: {str(e)}")
         return []
 
-def search_transcriptions(session, search_term, file_type=None, language=None, date_range=None):
+def search_transcriptions(session, search_term, file_type=None, language=None, date_range=None, account_name=None):
     """Search transcriptions"""
     if session is None:
         return pd.DataFrame()
     
-    where_conditions = [f"TRANSCRIPT ILIKE '%{search_term}%'"]
+    where_conditions = [f"(TRANSCRIPT ILIKE '%{search_term}%' OR MEETING_TITLE ILIKE '%{search_term}%')"]
     
     if file_type and file_type != "All":
         where_conditions.append(f"FILE_TYPE = '{file_type}'")
     
     if language and language != "All":
         where_conditions.append(f"DETECTED_LANGUAGE = '{language}'")
+    
+    if account_name and account_name != "All":
+        where_conditions.append(f"ACCOUNT_NAME = '{account_name}'")
     
     if date_range:
         start_date, end_date = date_range
@@ -213,7 +227,10 @@ def search_transcriptions(session, search_term, file_type=None, language=None, d
         TRANSCRIPT_WITH_SPEAKERS,
         SPEAKER_COUNT,
         TRANSCRIPTION_TIMESTAMP,
-        AUDIO_DURATION_SECONDS
+        AUDIO_DURATION_SECONDS,
+        MEETING_TITLE,
+        ACCOUNT_NAME,
+        CALL_START_TS
     FROM TRANSCRIPTION_RESULTS 
     WHERE {where_clause}
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
@@ -856,8 +873,7 @@ def main():
             st.metric("Total Audio Hours", f"{hours:.1f}")
         
         with col3:
-            avg_time = stats.get('avg_processing_time', 0)
-            st.metric("Avg Processing Time", f"{avg_time:.1f}s")
+            st.metric("Accounts", f"{stats.get('account_count', 0)}")
             
         with col4:
             st.metric("Languages Detected", f"{stats.get('languages', 0)}")
@@ -871,6 +887,25 @@ def main():
         
         st.divider()
         
+        # Top accounts chart + file types side by side
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Meetings by Account")
+            if not df.empty:
+                account_counts = df[df['ACCOUNT_NAME'].notna()]['ACCOUNT_NAME'].value_counts().head(10)
+                if not account_counts.empty:
+                    st.bar_chart(account_counts)
+                else:
+                    st.info("No account data available yet")
+
+        with col2:
+            st.subheader("File Types")
+            if not df.empty:
+                st.bar_chart(df['FILE_TYPE'].value_counts())
+
+        st.divider()
+
         # Charts using Streamlit native charting
         col1, col2 = st.columns([2, 1])
         
@@ -884,13 +919,6 @@ def main():
                 # Use Streamlit's built-in line chart
                 st.line_chart(timeline_data.set_index('DATE')['Files Processed'])
         
-        with col2:
-            st.subheader("File Types")
-            if not df.empty:
-                file_type_counts = df['FILE_TYPE'].value_counts()
-                # Display as bar chart
-                st.bar_chart(file_type_counts)
-        
         # Language distribution
         st.subheader("Language Distribution")
         if not df.empty:
@@ -900,14 +928,24 @@ def main():
         # Recent files table
         st.subheader("Recent Transcriptions")
         if not df.empty:
-            recent_df = df.head(5)[['FILE_NAME', 'FILE_TYPE', 'DETECTED_LANGUAGE', 'SPEAKER_COUNT', 'TRANSCRIPTION_TIMESTAMP']]
-            st.dataframe(recent_df, use_container_width=True)
+            recent_df = df.head(5).copy()
+            recent_df['DISPLAY_TITLE'] = recent_df['MEETING_TITLE'].where(recent_df['MEETING_TITLE'].notna(), recent_df['FILE_NAME'])
+            st.dataframe(
+                recent_df[['DISPLAY_TITLE', 'ACCOUNT_NAME', 'CALL_START_TS', 'DETECTED_LANGUAGE', 'SPEAKER_COUNT']].rename(columns={
+                    'DISPLAY_TITLE': 'Meeting',
+                    'ACCOUNT_NAME': 'Account',
+                    'CALL_START_TS': 'Date',
+                    'DETECTED_LANGUAGE': 'Language',
+                    'SPEAKER_COUNT': 'Speakers',
+                }),
+                use_container_width=True
+            )
     
     with tab2:
         st.header("🔍 Search Transcriptions")
         
         # Search controls
-        col1, col2, col3 = st.columns([2, 1, 1])
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
         
         with col1:
             search_term = st.text_input("Search in transcripts:", placeholder="Enter keywords to search...")
@@ -919,6 +957,10 @@ def main():
         with col3:
             languages = ["All"] + sorted(df['DETECTED_LANGUAGE'].unique().tolist())
             selected_language = st.selectbox("Language:", languages)
+
+        with col4:
+            accounts = ["All"] + sorted(df['ACCOUNT_NAME'].dropna().unique().tolist())
+            selected_account = st.selectbox("Account:", accounts)
         
         # Additional search options
         col1, col2, col3 = st.columns(3)
@@ -949,22 +991,26 @@ def main():
                     session, search_term, 
                     selected_file_type if selected_file_type != "All" else None,
                     selected_language if selected_language != "All" else None,
-                    (start_date, end_date)
+                    (start_date, end_date),
+                    selected_account if selected_account != "All" else None
                 )
             
             st.subheader(f"Search Results ({len(search_results)} found)")
             
             if not search_results.empty:
                 for idx, row in search_results.iterrows():
+                    display_title = row.get('MEETING_TITLE') if pd.notna(row.get('MEETING_TITLE')) else row['FILE_NAME']
+                    account_str = f" · {row['ACCOUNT_NAME']}" if pd.notna(row.get('ACCOUNT_NAME')) else ""
+                    date_str = str(row['CALL_START_TS'])[:10] if pd.notna(row.get('CALL_START_TS')) else str(row['TRANSCRIPTION_TIMESTAMP'])[:10]
                     with st.container():
                         st.markdown(f"""
                         <div class="search-result">
-                            <h4>📄 {row['FILE_NAME']}</h4>
-                            <p><strong>Type:</strong> {row['FILE_TYPE']} | 
+                            <h4>📄 {display_title}{account_str}</h4>
+                            <p><strong>Date:</strong> {date_str} | 
+                               <strong>Type:</strong> {row['FILE_TYPE']} | 
                                <strong>Language:</strong> {row['DETECTED_LANGUAGE']} | 
                                <strong>Speakers:</strong> {row.get('SPEAKER_COUNT', 'N/A')} |
                                <strong>Duration:</strong> {row['AUDIO_DURATION_SECONDS']:.1f}s</p>
-                            <p><strong>Date:</strong> {row['TRANSCRIPTION_TIMESTAMP']}</p>
                         </div>
                         """, unsafe_allow_html=True)
                         
@@ -1093,10 +1139,10 @@ def main():
     with tab3:
         st.header("👥 Speaker-by-Speaker Transcripts")
         
-        # File selection
-        files_with_speakers = df[df['SPEAKER_COUNT'] > 0]['FILE_NAME'].tolist()
+        # File selection — show meeting title when available, fall back to file name
+        files_with_speakers = df[df['SPEAKER_COUNT'] > 0].copy()
         
-        if not files_with_speakers:
+        if files_with_speakers.empty:
             st.markdown("""
             <div class="info-box">
                 <h4>ℹ️ No files with speaker data found</h4>
@@ -1104,20 +1150,27 @@ def main():
                 Files will still show structured segments based on timing.</p>
             </div>
             """, unsafe_allow_html=True)
-            files_with_speakers = df['FILE_NAME'].tolist()[:10]  # Show first 10 files as fallback
-        
-        selected_file = st.selectbox(
-            "Select a file to view speaker segments:",
-            options=files_with_speakers,
-            index=0 if files_with_speakers else None
+            files_with_speakers = df.head(10).copy()
+
+        files_with_speakers['DISPLAY_LABEL'] = files_with_speakers['MEETING_TITLE'].where(
+            files_with_speakers['MEETING_TITLE'].notna(), files_with_speakers['FILE_NAME']
         )
+        label_to_filename = dict(zip(files_with_speakers['DISPLAY_LABEL'], files_with_speakers['FILE_NAME']))
+        display_labels = files_with_speakers['DISPLAY_LABEL'].tolist()
+
+        selected_label = st.selectbox(
+            "Select a meeting to view:",
+            options=display_labels,
+            index=0 if display_labels else None
+        )
+        selected_file = label_to_filename.get(selected_label) if selected_label else None
         
         if selected_file:
             # Get file metadata
             file_row = df[df['FILE_NAME'] == selected_file].iloc[0]
             
             # Display file info and export controls
-            col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
+            col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 2])
             with col1:
                 st.metric("File Type", file_row['FILE_TYPE'])
             with col2:
@@ -1129,6 +1182,9 @@ def main():
                 speakers = file_row.get('SPEAKER_COUNT', 0)
                 st.metric("Speakers", f"{speakers}" if speakers > 0 else "N/A")
             with col5:
+                account_val = file_row.get('ACCOUNT_NAME')
+                st.metric("Account", account_val if pd.notna(account_val) else "—")
+            with col6:
                 # Export button
                 st.markdown("**📥 Export Options:**")
                 
@@ -1210,10 +1266,37 @@ def main():
                     else:
                         st.caption("CSV N/A")
             
-            # Summary preview section
-            if summary_markdown and pd.notna(summary_markdown):
-                with st.expander("📋 AI-Generated Summary", expanded=False):
-                    st.markdown(summary_markdown)
+            # Summary / structured insights section
+            has_summary = summary_markdown and pd.notna(summary_markdown)
+            key_points = file_row.get('KEY_POINTS')
+            next_steps = file_row.get('NEXT_STEPS')
+            decisions = file_row.get('DECISIONS_MADE')
+            questions = file_row.get('QUESTIONS_RAISED')
+            has_structured = any(pd.notna(v) and v for v in [key_points, next_steps, decisions, questions])
+
+            if has_summary or has_structured:
+                with st.expander("📋 Meeting Summary & Insights", expanded=False):
+                    if has_structured:
+                        scol1, scol2 = st.columns(2)
+                        with scol1:
+                            if pd.notna(key_points) and key_points:
+                                st.markdown("**Key Points**")
+                                st.markdown(key_points if isinstance(key_points, str) else str(key_points))
+                            if pd.notna(decisions) and decisions:
+                                st.markdown("**Decisions Made**")
+                                st.markdown(decisions if isinstance(decisions, str) else str(decisions))
+                        with scol2:
+                            if pd.notna(next_steps) and next_steps:
+                                st.markdown("**Next Steps**")
+                                st.markdown(next_steps if isinstance(next_steps, str) else str(next_steps))
+                            if pd.notna(questions) and questions:
+                                st.markdown("**Questions Raised**")
+                                st.markdown(questions if isinstance(questions, str) else str(questions))
+                        if has_summary:
+                            st.divider()
+                    if has_summary:
+                        st.markdown("**Full Summary**")
+                        st.markdown(summary_markdown)
             
             st.divider()
             
@@ -1318,15 +1401,19 @@ def main():
         st.header("📋 Browse All Data")
         
         # Filters
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             filter_file_type = st.selectbox("Filter by File Type:", ["All"] + sorted(df['FILE_TYPE'].unique()))
         
         with col2:
             filter_language = st.selectbox("Filter by Language:", ["All"] + sorted(df['DETECTED_LANGUAGE'].unique()))
-        
+
         with col3:
+            filter_accounts = ["All"] + sorted(df['ACCOUNT_NAME'].dropna().unique().tolist())
+            filter_account = st.selectbox("Filter by Account:", filter_accounts)
+        
+        with col4:
             sort_by = st.selectbox("Sort by:", ["TRANSCRIPTION_TIMESTAMP", "FILE_NAME", "SPEAKER_COUNT", "PROCESSING_TIME_SECONDS", "AUDIO_DURATION_SECONDS"])
         
         # Apply filters
@@ -1337,6 +1424,9 @@ def main():
         
         if filter_language != "All":
             filtered_df = filtered_df[filtered_df['DETECTED_LANGUAGE'] == filter_language]
+
+        if filter_account != "All":
+            filtered_df = filtered_df[filtered_df['ACCOUNT_NAME'] == filter_account]
         
         # Sort
         filtered_df = filtered_df.sort_values(sort_by, ascending=False)
@@ -1349,7 +1439,10 @@ def main():
                 col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
                 
                 with col1:
-                    st.markdown(f"**{row['FILE_NAME']}**")
+                    display_title = row['MEETING_TITLE'] if pd.notna(row.get('MEETING_TITLE')) else row['FILE_NAME']
+                    account_str = f"  ·  {row['ACCOUNT_NAME']}" if pd.notna(row.get('ACCOUNT_NAME')) else ""
+                    date_str = f"  ·  {str(row['CALL_START_TS'])[:10]}" if pd.notna(row.get('CALL_START_TS')) else ""
+                    st.markdown(f"**{display_title}**{account_str}{date_str}")
                 
                 with col2:
                     st.text(f"{row['FILE_TYPE']}")

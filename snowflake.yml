@@ -1,0 +1,15 @@
+definition_version: 2
+
+entities:
+  transcription_dashboard:
+    type: streamlit
+    identifier:
+      database: TRANSCRIPTION_DB_V2
+      schema: TRANSCRIPTION_SCHEMA_V2
+      name: JJ548C_5ROCDKNPO
+    title: transcription_dashboard_v2
+    query_warehouse: TRANSCRIPTION_WH_V2
+    main_file: streamlit/transcription_dashboard.py
+    stage: TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.STREAMLIT_STAGE
+    artifacts:
+      - streamlit/transcription_dashboard.py

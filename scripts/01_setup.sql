@@ -124,8 +124,19 @@ CREATE OR REPLACE TABLE IDENTIFIER($PROJECT_RESULTS_TABLE) (
     AUDIO_DURATION_SECONDS FLOAT,
     SPEAKER_COUNT NUMBER,              -- Number of identified speakers
     SRT_CONTENT TEXT,                  -- Pre-generated SRT (without speakers)
-    SRT_WITH_SPEAKERS TEXT,            -- Pre-generated SRT (with speakers)  
-    SUMMARY_MARKDOWN TEXT              -- AI-generated summary with follow-ups
+    SRT_WITH_SPEAKERS TEXT,            -- Pre-generated SRT (with speakers)
+    SUMMARY_MARKDOWN TEXT,             -- Full AI-generated summary (markdown)
+    -- Structured fields parsed from SUMMARY_MARKDOWN (mirrors Gong schema)
+    MEETING_TITLE VARCHAR(500),        -- LLM-inferred meeting title
+    CALL_BRIEF TEXT,                   -- Summary section prose
+    KEY_POINTS TEXT,                   -- Key Topics bullet list
+    NEXT_STEPS TEXT,                   -- Follow-up Items bullet list
+    DECISIONS_MADE TEXT,               -- Decisions Made bullet list
+    QUESTIONS_RAISED TEXT,             -- Questions Raised bullet list
+    -- Filename-derived metadata
+    ACCOUNT_NAME VARCHAR(255),         -- Account name extracted from filename
+    CALL_START_TS TIMESTAMP_NTZ,       -- Call start time extracted from filename
+    PARTICIPANTS_JSON VARIANT          -- Participant metadata (name/email/title/affiliation)
 );
 
 -- Create a view for easy querying (using dynamic SQL to resolve table name)
