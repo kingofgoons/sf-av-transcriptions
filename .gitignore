@@ -40,3 +40,6 @@ build/
 
 # Snowflake CLI deploy artifacts
 output/
+
+# Temporary migration scripts (ad-hoc, not for version control)
+migration/
