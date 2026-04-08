@@ -1,3 +1,4 @@
+# v2
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -5,6 +6,7 @@ from snowflake.snowpark.context import get_active_session
 import re
 import json
 import io
+import traceback
 
 # Page configuration
 st.set_page_config(
@@ -98,14 +100,14 @@ def load_transcription_data(session, limit=1000):
         SRT_CONTENT,
         SRT_WITH_SPEAKERS,
         SUMMARY_MARKDOWN,
-        TRANSCRIPTION_TIMESTAMP,
+        TO_CHAR(TRANSCRIPTION_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS') AS TRANSCRIPTION_TIMESTAMP,
         MEETING_TITLE,
         ACCOUNT_NAME,
-        CALL_START_TS,
-        KEY_POINTS,
-        NEXT_STEPS,
-        DECISIONS_MADE,
-        QUESTIONS_RAISED
+        TO_CHAR(CALL_START_TS, 'YYYY-MM-DD') AS CALL_START_TS,
+        TO_VARCHAR(KEY_POINTS) AS KEY_POINTS,
+        TO_VARCHAR(NEXT_STEPS) AS NEXT_STEPS,
+        TO_VARCHAR(DECISIONS_MADE) AS DECISIONS_MADE,
+        TO_VARCHAR(QUESTIONS_RAISED) AS QUESTIONS_RAISED
     FROM TRANSCRIPTION_RESULTS 
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
     LIMIT {limit}
@@ -230,7 +232,7 @@ def search_transcriptions(session, search_term, file_type=None, language=None, d
         AUDIO_DURATION_SECONDS,
         MEETING_TITLE,
         ACCOUNT_NAME,
-        CALL_START_TS
+        TO_CHAR(CALL_START_TS, 'YYYY-MM-DD') AS CALL_START_TS
     FROM TRANSCRIPTION_RESULTS 
     WHERE {where_clause}
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
@@ -839,11 +841,41 @@ def main():
         if st.button("🔄 Refresh Data"):
             # Clear any cached data that depends on the session
             st.cache_data.clear()
-            st.rerun()
+            st.rerun() if hasattr(st, 'rerun') else st.experimental_rerun()
+
+        st.divider()
+        debug_mode = st.checkbox("Debug Mode", value=False, help="Show DataFrame dtypes, sample values, and full error tracebacks")
     
     # Load main dataset
     df = load_transcription_data(session, data_limit)
-    
+
+    # TRANSCRIPTION_TIMESTAMP was cast to VARCHAR in SQL to avoid PyArrow timezone
+    # serialization issues. Re-parse here as timezone-naive datetime64[ns].
+    if not df.empty and 'TRANSCRIPTION_TIMESTAMP' in df.columns:
+        df['TRANSCRIPTION_TIMESTAMP'] = pd.to_datetime(df['TRANSCRIPTION_TIMESTAMP'])
+
+    # Debug panel — shown immediately after load so types are visible even if
+    # a later rendering call crashes before any output reaches the screen
+    if debug_mode and not df.empty:
+        with st.expander("Debug Info", expanded=True):
+            st.write(f"**Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
+
+            dtype_df = pd.DataFrame({
+                "Column": df.dtypes.index,
+                "dtype": df.dtypes.astype(str).values,
+                "nulls": df.isnull().sum().values,
+                "sample": [repr(df[c].iloc[0])[:120] if not df.empty else "" for c in df.columns],
+            })
+            st.dataframe(dtype_df, use_container_width=True)
+
+            st.write("**Full first-row values** (to spot unexpected Python types):")
+            for col in df.columns:
+                try:
+                    val = df[col].iloc[0]
+                    st.write(f"`{col}` `({type(val).__name__})` → `{repr(val)[:200]}`")
+                except Exception as col_err:
+                    st.error(f"`{col}`: ERROR reading — {col_err}")
+
     if df.empty:
         st.markdown("""
         <div class="info-box">
@@ -895,14 +927,22 @@ def main():
             if not df.empty:
                 account_counts = df[df['ACCOUNT_NAME'].notna()]['ACCOUNT_NAME'].value_counts().head(10)
                 if not account_counts.empty:
-                    st.bar_chart(account_counts)
+                    try:
+                        st.bar_chart(account_counts)
+                    except Exception as _chart_e:
+                        st.error(f"[bar_chart: Meetings by Account] {type(_chart_e).__name__}: {_chart_e}")
+                        st.code(traceback.format_exc())
                 else:
                     st.info("No account data available yet")
 
         with col2:
             st.subheader("File Types")
             if not df.empty:
-                st.bar_chart(df['FILE_TYPE'].value_counts())
+                try:
+                    st.bar_chart(df['FILE_TYPE'].value_counts())
+                except Exception as _chart_e:
+                    st.error(f"[bar_chart: File Types] {type(_chart_e).__name__}: {_chart_e}")
+                    st.code(traceback.format_exc())
 
         st.divider()
 
@@ -913,33 +953,43 @@ def main():
             st.subheader("Processing Timeline")
             if not df.empty:
                 # Create timeline chart
-                df['DATE'] = pd.to_datetime(df['TRANSCRIPTION_TIMESTAMP']).dt.date
+                df['DATE'] = pd.to_datetime(df['TRANSCRIPTION_TIMESTAMP']).dt.normalize()
                 timeline_data = df.groupby('DATE').size().reset_index(name='Files Processed')
-                
-                # Use Streamlit's built-in line chart
-                st.line_chart(timeline_data.set_index('DATE')['Files Processed'])
+                try:
+                    st.line_chart(timeline_data.set_index('DATE')['Files Processed'])
+                except Exception as _chart_e:
+                    st.error(f"[line_chart: Processing Timeline] {type(_chart_e).__name__}: {_chart_e}")
+                    st.code(traceback.format_exc())
         
         # Language distribution
         st.subheader("Language Distribution")
         if not df.empty:
             lang_counts = df['DETECTED_LANGUAGE'].value_counts().head(10)
-            st.bar_chart(lang_counts)
+            try:
+                st.bar_chart(lang_counts)
+            except Exception as _chart_e:
+                st.error(f"[bar_chart: Language Distribution] {type(_chart_e).__name__}: {_chart_e}")
+                st.code(traceback.format_exc())
         
         # Recent files table
         st.subheader("Recent Transcriptions")
         if not df.empty:
             recent_df = df.head(5).copy()
             recent_df['DISPLAY_TITLE'] = recent_df['MEETING_TITLE'].where(recent_df['MEETING_TITLE'].notna(), recent_df['FILE_NAME'])
-            st.dataframe(
-                recent_df[['DISPLAY_TITLE', 'ACCOUNT_NAME', 'CALL_START_TS', 'DETECTED_LANGUAGE', 'SPEAKER_COUNT']].rename(columns={
-                    'DISPLAY_TITLE': 'Meeting',
-                    'ACCOUNT_NAME': 'Account',
-                    'CALL_START_TS': 'Date',
-                    'DETECTED_LANGUAGE': 'Language',
-                    'SPEAKER_COUNT': 'Speakers',
-                }),
-                use_container_width=True
-            )
+            try:
+                st.dataframe(
+                    recent_df[['DISPLAY_TITLE', 'ACCOUNT_NAME', 'CALL_START_TS', 'DETECTED_LANGUAGE', 'SPEAKER_COUNT']].rename(columns={
+                        'DISPLAY_TITLE': 'Meeting',
+                        'ACCOUNT_NAME': 'Account',
+                        'CALL_START_TS': 'Date',
+                        'DETECTED_LANGUAGE': 'Language',
+                        'SPEAKER_COUNT': 'Speakers',
+                    }),
+                    use_container_width=True
+                )
+            except Exception as _chart_e:
+                st.error(f"[st.dataframe: Recent Transcriptions] {type(_chart_e).__name__}: {_chart_e}")
+                st.code(traceback.format_exc())
     
     with tab2:
         st.header("🔍 Search Transcriptions")
@@ -955,7 +1005,7 @@ def main():
             selected_file_type = st.selectbox("File Type:", file_types)
         
         with col3:
-            languages = ["All"] + sorted(df['DETECTED_LANGUAGE'].unique().tolist())
+            languages = ["All"] + sorted(df['DETECTED_LANGUAGE'].dropna().unique().tolist())
             selected_language = st.selectbox("Language:", languages)
 
         with col4:
@@ -1152,18 +1202,13 @@ def main():
             """, unsafe_allow_html=True)
             files_with_speakers = df.head(10).copy()
 
-        files_with_speakers['DISPLAY_LABEL'] = files_with_speakers['MEETING_TITLE'].where(
-            files_with_speakers['MEETING_TITLE'].notna(), files_with_speakers['FILE_NAME']
-        )
-        label_to_filename = dict(zip(files_with_speakers['DISPLAY_LABEL'], files_with_speakers['FILE_NAME']))
-        display_labels = files_with_speakers['DISPLAY_LABEL'].tolist()
+        file_names = files_with_speakers['FILE_NAME'].tolist()
 
-        selected_label = st.selectbox(
+        selected_file = st.selectbox(
             "Select a meeting to view:",
-            options=display_labels,
-            index=0 if display_labels else None
+            options=file_names,
+            index=0 if file_names else None
         )
-        selected_file = label_to_filename.get(selected_label) if selected_label else None
         
         if selected_file:
             # Get file metadata
@@ -1343,7 +1388,10 @@ def main():
                 valid_data = df.dropna(subset=['PROCESSING_TIME_SECONDS', 'AUDIO_DURATION_SECONDS'])
                 if not valid_data.empty:
                     chart_data = valid_data[['AUDIO_DURATION_SECONDS', 'PROCESSING_TIME_SECONDS']]
-                    st.scatter_chart(chart_data.set_index('AUDIO_DURATION_SECONDS'))
+                    if hasattr(st, 'scatter_chart'):
+                        st.scatter_chart(chart_data.set_index('AUDIO_DURATION_SECONDS'))
+                    else:
+                        st.line_chart(chart_data.set_index('AUDIO_DURATION_SECONDS'))
             
             with col2:
                 st.subheader("File Size Distribution")
@@ -1407,7 +1455,7 @@ def main():
             filter_file_type = st.selectbox("Filter by File Type:", ["All"] + sorted(df['FILE_TYPE'].unique()))
         
         with col2:
-            filter_language = st.selectbox("Filter by Language:", ["All"] + sorted(df['DETECTED_LANGUAGE'].unique()))
+            filter_language = st.selectbox("Filter by Language:", ["All"] + sorted(df['DETECTED_LANGUAGE'].dropna().unique()))
 
         with col3:
             filter_accounts = ["All"] + sorted(df['ACCOUNT_NAME'].dropna().unique().tolist())
@@ -1505,5 +1553,12 @@ def main():
     st.markdown("---")
     st.markdown("Built with ❤️ using Streamlit in Snowflake")
 
-if __name__ == "__main__":
-    main() 
+try:
+    main()
+except Exception as _e:
+    st.error(f"**Fatal app error — `{type(_e).__name__}: {_e}`**")
+    st.code(traceback.format_exc(), language="python")
+    st.warning(
+        "Enable **Debug Mode** in the sidebar for column-level dtype details "
+        "that help pinpoint PyArrow serialization failures."
+    )

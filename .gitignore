@@ -25,6 +25,9 @@ av.uploader/config.json
 # Cortex Code local files
 .cortex/
 
+# Streamlit local secrets (credentials — never commit)
+.streamlit/secrets.toml
+
 # Python
 __pycache__/
 *.py[cod]
