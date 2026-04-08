@@ -122,6 +122,12 @@ snow sql -f scripts/06_gong_objects.sql --connection YOUR_CONNECTION
 
 # 5. Deploy Streamlit dashboard
 snow streamlit deploy --replace --connection YOUR_CONNECTION
+
+# If your CLI session token is expired (e.g. DEMO account), use a temporary connection with a PAT:
+PAT=$(grep 'password' ~/.snowflake/config.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+snow streamlit deploy --replace --temporary-connection \
+    --account YOUR_ACCOUNT --user YOUR_USER --password "$PAT" \
+    --role ACCOUNTADMIN --warehouse ADHOC_WH
 ```
 
 ### Upload Files
@@ -217,8 +223,7 @@ audio-video-transcription-snowflake/
 │                                     #   semantic view, and Cortex Agent (runs on DEMO)
 ├── notebooks/
 │   └── audio_video_transcription.ipynb  # GPU transcription notebook
-├── streamlit/
-│   └── transcription_dashboard.py       # Streamlit in Snowflake dashboard
+├── transcription_dashboard.py           # Streamlit in Snowflake dashboard
 ├── av.uploader/
 │   ├── upload_av_files.py               # CLI uploader with Gong sync prompt
 │   ├── config.template.json             # Connection config template
@@ -247,3 +252,8 @@ audio-video-transcription-snowflake/
 | Stream staleness | Check `DATA_RETENTION_TIME_IN_DAYS >= 14` on the database |
 | Gong sync fails | Verify `snowhouse` connection is configured; check `--enable-templating NONE` flag |
 | Duplicate transcriptions | Ensure `SKIP_ALREADY_TRANSCRIBED = True` in notebook Cell 4 |
+| SiS "Python Interpreter Error: TypeError: bad argument type" | The main file must be at the **stage root** — no subdirectory. `snowflake.yml` `main_file` and `artifacts` must both reference `transcription_dashboard.py` with no path prefix. Any subdirectory name that matches a Python package (e.g. `streamlit/`) will shadow that package and cause this error. |
+| SiS "No such file or directory: /tmp/appRoot/transcription_dashboard.py" | Same root cause as above — the main file is in a subdirectory on the stage. SiS resolves `MAIN_FILE` by basename only. Move the file to the stage root. |
+| SiS `AttributeError: module 'streamlit' has no attribute 'rerun'` | The default SiS Streamlit runtime is older than 1.27. Use `st.rerun() if hasattr(st, 'rerun') else st.experimental_rerun()`. |
+| SiS `AttributeError: module 'streamlit' has no attribute 'scatter_chart'` | `st.scatter_chart` requires Streamlit ≥ 1.25. Guard with `hasattr(st, 'scatter_chart')` and fall back to `st.line_chart`. |
+| SiS app loads but shows stale content after redeploy | SiS has a server-side cache. Force a refresh by making a trivial edit to the source file before redeploying. |
