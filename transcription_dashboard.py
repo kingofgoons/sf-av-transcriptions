@@ -7,6 +7,7 @@ import re
 import json
 import io
 import traceback
+import base64
 
 # Page configuration
 st.set_page_config(
@@ -821,6 +822,23 @@ def convert_search_results_to_srt(context_segments, file_info=None, search_term=
     
     return "\n".join(srt_content)
 
+def srt_download_link(content, filename, label):
+    """Data URI download link for SRT files.
+
+    st.download_button uses S3 presigned URLs in SiS. Snowsight appends
+    ?title=... to those URLs, corrupting the AWS signature. Embedding
+    the content as a data URI bypasses S3 entirely.
+    """
+    b64 = base64.b64encode(content.encode('utf-8')).decode()
+    href = (
+        f'<a href="data:text/plain;charset=utf-8;base64,{b64}" '
+        f'download="{filename}" '
+        f'style="display:inline-block;padding:5px 10px;background:#f0f2f6;'
+        f'color:#31333F;border:1px solid #d1d5db;border-radius:4px;'
+        f'text-decoration:none;font-size:14px;">{label}</a>'
+    )
+    st.markdown(href, unsafe_allow_html=True)
+
 def main():
     st.title("🎵 Audio/Video Transcription Dashboard")
     st.markdown("Explore and analyze your transcribed audio and video files")
@@ -1123,29 +1141,13 @@ def main():
                                             
                                             with btn_col2:
                                                 if search_srt_content_with_speakers:
-                                                    search_srt_filename = f"search_{clean_search_term}_{clean_filename}.srt"
-                                                    
-                                                    st.download_button(
-                                                        label="🎬 SRT (w/ Speakers)",
-                                                        data=search_srt_content_with_speakers,
-                                                        file_name=search_srt_filename,
-                                                        mime="application/x-subrip",
-                                                        help="Export as SRT with speaker labels",
-                                                        key=f"srt_speakers_{idx}_{row['FILE_NAME']}"
-                                                    )
+                                                    search_srt_filename = row['FILE_NAME'].rsplit('.', 1)[0] + '.srt'
+                                                    srt_download_link(search_srt_content_with_speakers, search_srt_filename, "🎬 SRT (w/ Speakers)")
                                             
                                             with btn_col3:
                                                 if search_srt_content_no_speakers:
-                                                    search_srt_filename_no_speakers = f"search_{clean_search_term}_{clean_filename}_no_speakers.srt"
-                                                    
-                                                    st.download_button(
-                                                        label="🎬 SRT (no Speakers)",
-                                                        data=search_srt_content_no_speakers,
-                                                        file_name=search_srt_filename_no_speakers,
-                                                        mime="application/x-subrip",
-                                                        help="Export as SRT without speaker labels",
-                                                        key=f"srt_no_speakers_{idx}_{row['FILE_NAME']}"
-                                                    )
+                                                    search_srt_filename_no_speakers = row['FILE_NAME'].rsplit('.', 1)[0] + '_no_speakers.srt'
+                                                    srt_download_link(search_srt_content_no_speakers, search_srt_filename_no_speakers, "🎬 SRT (no Speakers)")
                                         
                                         with st.expander(expander_label, expanded=True):
                                             display_search_result_with_speakers(context_segments, search_term, file_info)
@@ -1247,28 +1249,16 @@ def main():
                 with export_col1:
                     # Use pre-computed SRT without speakers
                     if srt_content and pd.notna(srt_content):
-                        srt_filename = f"transcript_{clean_filename}.srt"
-                        st.download_button(
-                            label="📥 SRT",
-                            data=srt_content,
-                            file_name=srt_filename,
-                            mime="application/x-subrip",
-                            help="Download as SRT subtitles"
-                        )
+                        srt_filename = selected_file.rsplit('.', 1)[0] + '.srt'
+                        srt_download_link(srt_content, srt_filename, "📥 SRT")
                     else:
                         st.caption("SRT N/A")
                 
                 with export_col2:
                     # Use pre-computed SRT with speakers
                     if srt_with_speakers and pd.notna(srt_with_speakers):
-                        srt_filename_speakers = f"transcript_{clean_filename}_speakers.srt"
-                        st.download_button(
-                            label="📥 SRT+",
-                            data=srt_with_speakers,
-                            file_name=srt_filename_speakers,
-                            mime="application/x-subrip",
-                            help="Download as SRT with speaker labels"
-                        )
+                        srt_filename_speakers = selected_file.rsplit('.', 1)[0] + '_speakers.srt'
+                        srt_download_link(srt_with_speakers, srt_filename_speakers, "📥 SRT+")
                     else:
                         st.caption("SRT+ N/A")
                 
