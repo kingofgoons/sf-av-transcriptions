@@ -1271,7 +1271,8 @@ def main():
                             data=summary_markdown,
                             file_name=md_filename,
                             mime="text/markdown",
-                            help="Download AI-generated summary"
+                            help="Download AI-generated summary",
+                            key=f"summary_{clean_filename}"
                         )
                     else:
                         st.caption("Summary N/A")
@@ -1294,7 +1295,8 @@ def main():
                                 data=csv_string,
                                 file_name=download_filename,
                                 mime="text/csv",
-                                help="Download as CSV spreadsheet"
+                                help="Download as CSV spreadsheet",
+                                key=f"csv_{clean_filename}"
                             )
                         else:
                             st.caption("CSV N/A")
