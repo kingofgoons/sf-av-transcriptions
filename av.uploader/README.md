@@ -174,7 +174,11 @@ Verifying stage contents...
 ℹ️  The automated transcription pipeline will process these files within 5 minutes.
 
 ✓ Connection closed
+
+Sync Gong calls from Snowhouse → DEMO? [y/N]
 ```
+
+After the upload completes, the script prompts whether to sync Gong calls via `scripts/05_sync_gong.sh`. Enter `y` to run the sync or press Enter to skip.
 
 ## 🔒 Security Best Practices
 
@@ -241,11 +245,53 @@ nano config.json  # or use your preferred editor
 av.uploader/
 ├── README.md                        # This file
 ├── create_av_service_user.sql       # SQL script to create service account
+├── cleanup_av_service_user.sql      # SQL script to remove service account
 ├── config.template.json             # Template for configuration
 ├── config.json                      # Your configuration (git-ignored)
 ├── upload_av_files.py               # Main upload script
+├── download_srts.py                 # Download SRT subtitle files from Snowflake
 └── requirements.txt                 # Python dependencies
 ```
+
+## 📥 Downloading SRT Subtitle Files
+
+`download_srts.py` fetches pre-generated SRT subtitle files from `TRANSCRIPTION_RESULTS` and writes them to a local directory. It uses the same `config.json` and RSA key as the uploader.
+
+### Usage
+
+```bash
+# Download SRTs for a date range (writes both plain and speaker-labeled SRTs)
+python download_srts.py --start 2024-01-01 --end 2024-01-31
+
+# Write to a custom output directory
+python download_srts.py --start 2024-01-01 --end 2024-01-31 --output ./my_srts
+
+# Skip plain SRT, write only speaker-labeled SRTs
+python download_srts.py --start 2024-01-01 --end 2024-01-31 --no-plain
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|---|---|---|
+| `--start` | Yes | Start date, inclusive (`YYYY-MM-DD`) |
+| `--end` | Yes | End date, inclusive (`YYYY-MM-DD`) |
+| `--output` | No | Output directory (default: `srt_output`) |
+| `--no-plain` | No | Skip plain SRT, write only `_speakers.srt` |
+
+### Output Files
+
+For each transcription, the script writes up to two files:
+- `<filename>.srt` — plain subtitles (timestamps + text)
+- `<filename>_speakers.srt` — subtitles with speaker labels (`[SPEAKER_00] text`)
+
+Files with a `NULL` `TRANSCRIPT_WITH_SPEAKERS` column (e.g., diarization was disabled) are skipped with a warning.
+
+## 🧹 Service Account Cleanup
+
+To remove the service user and role from Snowflake, run `cleanup_av_service_user.sql` in Snowsight or your SQL client. This drops `AV_UPLOADER_SERVICE_USER` and `AV_UPLOADER_SERVICE_ROLE` and revokes all their grants.
+
+The cleanup script does **not** remove the transcription database, schema, warehouse, or stage — those are managed by the main project teardown scripts (`scripts/04_teardown.sql`).
 
 ## 🔗 Related Documentation
 
