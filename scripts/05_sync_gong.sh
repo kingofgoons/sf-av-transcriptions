@@ -215,7 +215,18 @@ if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}(skipping write to DEMO)${NC}"
 else
     echo -e "${YELLOW}Step 3: Merging into DEMO ($TARGET)...${NC}"
-    snow sql -f "$MERGE_FILE" --connection "$DEMO_CONNECTION"
+    SNOW_OUT=$(mktemp)
+    if ! snow sql -f "$MERGE_FILE" --connection "$DEMO_CONNECTION" --enable-templating NONE > "$SNOW_OUT" 2>&1; then
+        echo -e "${RED}Merge failed.${NC}"
+        echo -e "${RED}snow sql output:${NC}"
+        cat "$SNOW_OUT"
+        echo ""
+        echo -e "${RED}MERGE SQL (first 80 lines for debugging):${NC}"
+        head -80 "$MERGE_FILE"
+        rm -f "$SNOW_OUT"
+        exit 1
+    fi
+    rm -f "$SNOW_OUT"
     echo -e "${GREEN}Merge complete${NC}"
 fi
 
