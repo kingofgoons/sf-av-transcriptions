@@ -19,6 +19,10 @@ SET PROJECT_STREAM = 'AV_STAGE_STREAM_V2';           -- Stream for file detectio
 SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK_V2';  -- Transcription task
 SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh task
 
+-- Timeout configuration
+SET PROJECT_TASK_TIMEOUT_MS = 14400000;             -- 4 hours; EXECUTE NOTEBOOK is synchronous (blocks until notebook finishes)
+SET PROJECT_WH_STATEMENT_TIMEOUT = 14400;           -- Must match or exceed task timeout (in seconds)
+
 -- Integration names (these are account-level, so include prefix to avoid conflicts)
 SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration_V2';
 SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration_V2';

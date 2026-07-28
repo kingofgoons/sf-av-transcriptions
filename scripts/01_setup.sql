@@ -31,7 +31,11 @@ SET PROJECT_PYPI_RULE = 'pypi_network_rule_V2';
 USE ROLE SYSADMIN;
 
 -- Create warehouse, database, and schema for transcription project
-CREATE OR REPLACE WAREHOUSE IDENTIFIER($PROJECT_WH); --by default, this creates an XS Standard Warehouse
+CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER($PROJECT_WH)
+  WAREHOUSE_SIZE = 'XSMALL'
+  AUTO_SUSPEND = 60
+  AUTO_RESUME = TRUE
+  STATEMENT_TIMEOUT_IN_SECONDS = 14400;  -- 4 hours: EXECUTE NOTEBOOK blocks until completion
 CREATE OR REPLACE DATABASE IDENTIFIER($PROJECT_DB);
 
 -- Increase data retention to 14 days to prevent streams from going stale.

@@ -201,7 +201,7 @@ python av.uploader/download_srts.py
 
 - Config knobs live in Cell 4 of `audio_video_transcription.ipynb`: `WHISPER_MODEL`, `ENABLE_SPEAKER_DIARIZATION`, `SKIP_ALREADY_TRANSCRIBED`, `FORCE_RETRANSCRIBE`.
 - `base` is the default Whisper model — `large` is ~10× slower on GPU_NV_S. Flag the tradeoff before upsizing.
-- `EXECUTE NOTEBOOK` is fire-and-forget. The task exits immediately; transcription runs asynchronously. Monitor via `ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY`, not task history.
+- `EXECUTE NOTEBOOK` is **synchronous** — it blocks until the notebook finishes (or is killed by timeout). The warehouse is used only for initialization and SQL pushdown; Python/Whisper compute runs on the GPU pool. The task's `USER_TASK_TIMEOUT_MS` (4 hours) is the ceiling. Monitor via `ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY` for actual durations.
 - SRT subtitles are pre-generated at transcription time and stored in `TRANSCRIPTION_RESULTS`. Do not attempt to generate them dynamically at query time.
 
 ### Python

@@ -76,7 +76,9 @@ EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Step 3: Create a stored procedure to execute the notebook
 -- Using a stored procedure with EXECUTE AS OWNER ensures proper privileges
--- Note: EXECUTE NOTEBOOK is asynchronous - it starts the notebook but doesn't wait for completion
+-- Note: EXECUTE NOTEBOOK is synchronous — it blocks until the notebook finishes on the compute pool.
+-- The warehouse handles only initialization and SQL pushdown; Python runs on the GPU pool.
+-- USER_TASK_TIMEOUT_MS on the calling task is the effective ceiling for total runtime.
 -- Using anonymous block because SQL exceeds 256-byte session variable limit
 DECLARE
     sql_cmd VARCHAR;
@@ -109,6 +111,7 @@ BEGIN
     sql_cmd := 'CREATE OR REPLACE TASK ' || $PROJECT_TASK_TRANSCRIBE || '
         WAREHOUSE = ' || $PROJECT_WH || '
         SCHEDULE = ''5 MINUTE''
+        USER_TASK_TIMEOUT_MS = 14400000
         WHEN SYSTEM$STREAM_HAS_DATA(''' || $FQ_STREAM || ''')
     AS
         CALL ' || fq_proc || '()';
