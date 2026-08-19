@@ -226,6 +226,7 @@ written on hung runs and hide the very thing it was meant to expose.
 
 | `DERIVED_STATE` | Meaning |
 |---|---|
+| `STARTING` | Task is `EXECUTING` but nothing emitted yet — see below |
 | `RUNNING` | heartbeat fresh |
 | `FINISHING` | rows committed, container winding down |
 | `CELLS_COMPLETE` | all cells done; cross-checked against `TASK_HISTORY` |
@@ -236,6 +237,60 @@ written on hung runs and hide the very thing it was meant to expose.
 The 600s threshold is validated against real data: the largest observed gap between
 heartbeats is 49s (one Whisper call), second largest 38s (Cortex). Re-check it if the
 Whisper model is upsized — `large` is roughly 10x slower than `base`.
+
+### `STARTING`: the pre-emit window
+
+`STARTING` is **not** a state the notebook reports — it is derived when the task is
+`EXECUTING` but no run has emitted anything yet. That window is real and long: the first
+`emit()` sits at line 147 of notebook cell 5, but `!pip install openai-whisper pandas` is at
+line 4 of the same cell, so nothing is reported until torch and Whisper finish installing.
+**Measured: 62s to first event on a warm pool; ~125s on a cold one.**
+
+Without this state the panel showed the *previous* run's terminal card for minutes after a
+kickoff, which reads as "nothing happened" — or worse, as if the old run were the current
+one. When `STARTING`, the stale run's phase and unit counts are **suppressed**, because
+rendering "16 of 16 units (100%)" next to a run that has not begun is actively misleading.
+
+Distinguishing `STARTING` from the hang is subtle, because both are "task `EXECUTING`, newest
+run terminal". They are separated by **age, not state**: if the last heartbeat is *older* than
+the task's own elapsed time, that heartbeat cannot belong to this execution, so a new run is
+starting. Comparing the two elapsed counters avoids parsing timestamps across timezones.
+Equality is treated as the hang — flagging a hang wrongly is safer than hiding one.
+
+`STARTING` also blocks the kickoff button. `IS_ACTIVE` is false during this window, so keying
+only on `IS_ACTIVE` left the button live right after a kickoff. `ALLOW_OVERLAPPING_EXECUTION
+= FALSE` would reject the second run, so it was never dangerous — but the button appeared to
+do nothing, which is a poor way to discover that.
+
+### Reading a hang off the dashboard
+
+The panel cross-checks `TASK_HISTORY` on **every** poll, so green `COMPLETE` is itself the
+all-clear — no manual query needed:
+
+| Card | Meaning |
+|---|---|
+| green `COMPLETE` | Cells done **and** the task returned. Clean. |
+| orange `HUNG (work saved)` | Cells done, task still `EXECUTING`. The hang. |
+
+Signature of a real hang, from the verified 2026-08-19 10:07 run (3 files):
+
+```
+10:07:47  task starts, gate finds 3 new files
+10:12:14  file 1 written
+10:15:03  file 2 written
+10:17:42  file 3 written   <- all work done
+          ...7.5 min of nothing...
+10:25:12  task FAILED, error 604 "SQL execution canceled"
+```
+
+Three numbers worth remembering:
+
+- **Normal teardown is ~11s** (clean run: last event 15:27:21, task returned 15:27:32). So
+  `CELLS_COMPLETE` with the task still running past ~60s is a hang, not slow shutdown.
+- **A hang ends as `FAILED` with error 604, "SQL execution canceled"** — not a message
+  mentioning notebooks or timeouts. Do not chase a phantom SQL bug.
+- **The 1800s task timeout is not the ceiling in practice**; this one died at 1045s. Duration
+  alone is not the tell — the gap between the last transcript write and the task end is.
 
 ### Cost controls
 

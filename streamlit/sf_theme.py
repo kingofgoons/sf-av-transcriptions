@@ -171,6 +171,7 @@ def brand_header(title, subtitle=None):
 # visually distinct from a healthy run at a glance - that is the entire point of the hang
 # detector. Do not "brand" this map.
 STATE_STYLE = {
+    'STARTING':                 ('#1f77b4', '#eaf2fb', 'STARTING',          'Container starting - no progress reported yet'),
     'RUNNING':                  ('#1f77b4', '#eaf2fb', 'RUNNING',           'Transcription in progress'),
     'FINISHING':                ('#1f77b4', '#eaf2fb', 'FINISHING',         'Work committed, container winding down'),
     'CELLS_COMPLETE':           ('#4CAF50', '#eaf7ea', 'COMPLETE',          'All notebook cells finished'),

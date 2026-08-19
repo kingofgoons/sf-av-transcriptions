@@ -65,6 +65,30 @@ def get_task_state(session):
         return None
 
 
+def _n(v):
+    """Return v as an int, or None if it is NULL/NaN.
+
+    REQUIRED, not decorative. Snowflake NUMBER columns arrive from to_pandas() as float64
+    whenever the result contains a NULL, so a NULL becomes float('nan') - and **NaN is
+    truthy in Python**. `if run.get('FILE_TOTAL'):` therefore PASSES on a NULL and renders
+    the literal string "File nan of nan", which is exactly what the terminal COMPLETE event
+    (which carries no per-file context) displayed until 2026-08-19.
+
+    A float64 column also turns 6 into "6.0", so this casts to int as well.
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def get_backlog(session, refresh=True):
     """Untranscribed files on the stage.
 
@@ -115,51 +139,103 @@ def render_status_panel(session, refresh_stage=False):
     backlog = get_backlog(session, refresh=refresh_stage)
     n_backlog = 0 if backlog is None or backlog.empty else len(backlog)
 
+    # TASK_HISTORY is read on EVERY poll, not just when a run looks complete. It is the
+    # only source that knows a task is executing before the notebook has emitted anything,
+    # which is a 60-180s window (measured: 62s to first event on a warm pool; a cold GPU
+    # pool resume adds to that). Without this the panel shows the PREVIOUS run's terminal
+    # card for minutes after a kickoff, which reads as "nothing happened".
+    # Cost: one INFORMATION_SCHEMA table function call per refresh. Cheap, but not free -
+    # this is why auto-refresh defaults to OFF.
+    task = get_task_state(session)
+    task_running = bool(task and task.get('STATE') == 'EXECUTING')
+
     if run is None:
-        accent, bg, label, blurb = STATE_STYLE['IDLE']
-        state = 'IDLE'
+        state = 'STARTING' if task_running else 'IDLE'
+        accent, bg, label, blurb = STATE_STYLE[state]
     else:
         state = run.get('DERIVED_STATE') or 'RUNNING'
         accent, bg, label, blurb = STATE_STYLE.get(state, STATE_STYLE['IDLE'])
 
-        # Cross-check the task. A CELLS_COMPLETE run whose task is still EXECUTING means
-        # the container has not exited - that is the hang, and only TASK_HISTORY knows.
-        if state == 'CELLS_COMPLETE':
-            task = get_task_state(session)
-            if task and task.get('STATE') == 'EXECUTING':
+        # The task is up but the newest run we know about is already terminal. Two very
+        # different situations produce that, and they must not be confused:
+        #
+        #   STARTING  - a NEW execution has begun and has not emitted yet. The terminal
+        #               run belongs to a PREVIOUS execution.
+        #   HUNG      - the terminal run belongs to THIS execution, which means all cells
+        #               finished but the container never exited.
+        #
+        # Distinguish by age, not by state: if the last heartbeat is OLDER than the task's
+        # own elapsed time, that heartbeat predates this execution and cannot belong to it.
+        # Comparing the two elapsed counters avoids parsing timestamps across timezones.
+        if task_running and not run.get('IS_ACTIVE'):
+            hb = _n(run.get('SECONDS_SINCE_HEARTBEAT'))
+            elapsed = _n(task.get('ELAPSED_SEC'))
+            if hb is not None and elapsed is not None and hb > elapsed:
+                state = 'STARTING'
+                accent, bg, label, _ = STATE_STYLE[state]
+                blurb = (f"A run started {elapsed}s ago. The notebook installs Whisper "
+                         f"before it can report progress, so the first update takes "
+                         f"roughly 60-180s (longer on a cold GPU pool).")
+            elif state == 'CELLS_COMPLETE':
                 state = 'WORK_COMPLETE_NOT_EXITED'
                 accent, bg, label, _ = STATE_STYLE[state]
                 blurb = (f"All cells finished but the task is still EXECUTING after "
-                         f"{task.get('ELAPSED_SEC')}s. Known snowbook shutdown hang - "
+                         f"{elapsed}s. Known snowbook shutdown hang - "
                          f"transcripts are already saved.")
 
     detail_lines = []
-    if run is not None:
-        if run.get('PHASE'):
-            detail_lines.append(f"Phase {run.get('PHASE_NUM')} of {run.get('PHASE_TOTAL')} "
-                                f"&mdash; <b>{run.get('PHASE')}</b>")
-        if run.get('FILE_TOTAL'):
-            fi = run.get('FILE_INDEX')
-            fname = run.get('CURRENT_FILE') or ''
-            pos = (f"File {fi} of {run.get('FILE_TOTAL')}" if fi
-                   else f"{run.get('FILE_TOTAL')} file(s)")
-            detail_lines.append(f"{pos}{(' &mdash; ' + fname) if fname else ''}")
-        if run.get('FILE_STEP'):
-            detail_lines.append(f"Step {run.get('FILE_STEP_NUM')} of "
-                                f"{run.get('FILE_STEP_TOTAL')} &mdash; {run.get('FILE_STEP')}")
-        if run.get('UNITS_TOTAL'):
-            pct = run.get('PCT_COMPLETE')
+    # In STARTING, `run` is the PREVIOUS execution. Showing its phase and "8 of 8 units
+    # (100%)" here would actively mislead - it would look like the new run finished
+    # instantly. Suppress the stale detail and say plainly that nothing is reported yet.
+    if state == 'STARTING':
+        if n_backlog:
+            detail_lines.append(f"{n_backlog} file(s) queued for transcription")
+        detail_lines.append("<i>waiting for the first progress event&hellip;</i>")
+        if run is not None:
             detail_lines.append(
-                f"{run.get('UNITS_DONE')} of {run.get('UNITS_TOTAL')} units complete"
-                + (f" ({pct}%)" if pct is not None else ""))
+                f"<span class='timestamp'>previous run {str(run.get('RUN_ID'))[:8]} "
+                f"&middot; {run.get('DERIVED_STATE')}</span>")
+    elif run is not None:
+        phase_num, phase_total = _n(run.get('PHASE_NUM')), _n(run.get('PHASE_TOTAL'))
+        if run.get('PHASE') and phase_num and phase_total:
+            detail_lines.append(f"Phase {phase_num} of {phase_total} "
+                                f"&mdash; <b>{run.get('PHASE')}</b>")
+
+        # _n() throughout: NaN is truthy, so a bare `if run.get('FILE_TOTAL')` rendered
+        # "File nan of nan" on the terminal event.
+        file_total, file_index = _n(run.get('FILE_TOTAL')), _n(run.get('FILE_INDEX'))
+        if file_total:
+            fname = run.get('CURRENT_FILE') or ''
+            pos = (f"File {file_index} of {file_total}" if file_index
+                   else f"{file_total} file(s)")
+            detail_lines.append(f"{pos}{(' &mdash; ' + fname) if fname else ''}")
+
+        step_num, step_total = _n(run.get('FILE_STEP_NUM')), _n(run.get('FILE_STEP_TOTAL'))
+        if run.get('FILE_STEP') and step_num and step_total:
+            detail_lines.append(f"Step {step_num} of {step_total} "
+                                f"&mdash; {run.get('FILE_STEP')}")
+
+        units_done, units_total = _n(run.get('UNITS_DONE')), _n(run.get('UNITS_TOTAL'))
+        if units_total:
+            pct = run.get('PCT_COMPLETE')
+            pct_txt = ''
+            try:
+                if pct is not None and not pd.isna(pct):
+                    pct_txt = f" ({float(pct):.1f}%)"
+            except (TypeError, ValueError):
+                pass
+            detail_lines.append(
+                f"{units_done if units_done is not None else '?'} of {units_total} "
+                f"units complete{pct_txt}")
+
         if run.get('MESSAGE'):
             detail_lines.append(f"<i>{run.get('MESSAGE')}</i>")
         if run.get('ERROR_MESSAGE'):
             detail_lines.append(f"<b style='color:#c62828'>{run.get('ERROR_MESSAGE')}</b>")
-        hb = run.get('SECONDS_SINCE_HEARTBEAT')
+        hb = _n(run.get('SECONDS_SINCE_HEARTBEAT'))
         if hb is not None:
             detail_lines.append(
-                f"<span class='timestamp'>last heartbeat {int(hb)}s ago &middot; "
+                f"<span class='timestamp'>last heartbeat {hb}s ago &middot; "
                 f"run {str(run.get('RUN_ID'))[:8]} &middot; {run.get('RUN_SOURCE')}</span>")
 
     status_card(accent, bg, label, blurb, detail_lines)
@@ -258,7 +334,13 @@ def render_controls(session, run, n_backlog, state):
 
     # IS_ACTIVE comes from the view: false once a run reaches CELLS_COMPLETE, SUCCEEDED or
     # FAILED. A wedged container still counts as active, because it is still holding a GPU.
-    is_active = bool(run.get('IS_ACTIVE')) if run else False
+    #
+    # STARTING must block too. IS_ACTIVE is false during the 60-180s before the notebook
+    # emits its first event, so keying only on IS_ACTIVE left the button live immediately
+    # after a kickoff. The task's ALLOW_OVERLAPPING_EXECUTION = FALSE would reject the
+    # second run, so it was never dangerous - but the button appeared to do nothing, which
+    # is a poor way to discover that.
+    is_active = (bool(run.get('IS_ACTIVE')) if run else False) or state == 'STARTING'
 
     col_run, col_up = st.columns([1, 2])
 
