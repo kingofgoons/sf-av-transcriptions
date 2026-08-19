@@ -66,9 +66,25 @@ and present in every dump afterwards, which marks the moment the hang begins. Do
 
 **Scope note: this is a cost and observability fix, not a correctness fix.** Both hangs on
 2026-08-19 committed all 3 rows, with summaries and SRTs intact, before wedging. Across every hang
-observed, no transcript has ever been lost. The port's value is reclaiming ~30 min of idle GPU per
-hung multi-file run and getting a truthful task status — not repairing corrupted data. Weigh it
-accordingly, and do not let the port introduce a data risk that the hang never posed.
+observed, no transcript has ever been lost. The port's value is reclaiming GPU time leaked by hung
+runs — **which is indefinite, not the ~30 min the task timeout suggests** (see "the timeout does not
+stop the container" below) — and getting a truthful task status. Not repairing corrupted data.
+Weigh it accordingly, and do not let the port introduce a data risk that the hang never posed.
+
+**The task timeout does NOT stop the container — corrected 2026-08-19.** This matters for sizing the
+benefit of this port. `USER_TASK_TIMEOUT_MS` kills the task, not the notebook container. The 15:52
+hung run's task died at 16:22:06 while its container `STPLATNOTEBOOK23090324279953822` was still
+`RUNNING` at 16:57 — 35 minutes past task death, 65 minutes total — and had to be stopped manually
+with `ALTER COMPUTE POOL ... STOP ALL`. It would never have self-resolved: the service has
+`auto_suspend_secs = 0`, and the pool's `AUTO_SUSPEND = 3600` only counts *idle* time, which a
+RUNNING service prevents. So **each hung multi-file run leaks a `GPU_NV_S` node indefinitely.** At 6
+of 8 multi-file runs hanging, that is the real cost case for this port, and a plausible contributor
+to the historical ~230-credit runaway.
+
+**Add to task 6 validation:** after a ported run, confirm `SHOW COMPUTE POOLS` reports
+`num_services = 0` and `num_jobs = 0`, and that the pool reaches `SUSPENDED` on its own. A job
+service that exits should release the node without intervention — verify it, since this is the
+failure the notebook path hides.
 
 **The hang is multi-file-only:** 0 of 8 single-file runs hung; **6 of 8** multi-file runs did
 (updated 2026-08-19). Any reproduction must use 3+ files.
@@ -83,7 +99,7 @@ The port remains the right move, and the evidence strengthens it: a plain Python
 
 Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
 
-**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped) caps the waste. Rows still land before the hang, so the data is correct while the task reports FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed notebook — **leave it armed until the port is validated**; it produced the live 11-cycle stack capture on 2026-08-19 that proved the root cause, and it costs nothing on healthy runs (one baseline dump).
+**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped) caps the task — **but not the container, which leaks a GPU node indefinitely; see above.** Rows still land before the hang, so the data is correct while the task reports FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed notebook — **leave it armed until the port is validated**; it produced the live 11-cycle stack capture on 2026-08-19 that proved the root cause, and it costs nothing on healthy runs (one baseline dump).
 
 **The terminal error is not a stable signature.** Do not key validation or alerting on one error code. The 10:07 hang died at 1045s with error **604** "SQL execution canceled"; the 15:52 hang ran the full timeout and died at 1802s with error **000630** "Statement reached its statement or warehouse timeout of 1,800 second(s)". Neither message mentions notebooks or hanging. The durable signal is *transcripts present + task FAILED*, and the reliable tell is the gap between the last transcript write and the task end (7.5 min and ~10 min respectively) — not duration.
 

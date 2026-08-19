@@ -207,6 +207,38 @@ ORDER BY SCHEDULED_TIME DESC;
 A run lasting hours is the known snowbook shutdown hang, not slow transcription — see
 `documents/architecture/architecture.md` §5.
 
+### After ANY hang: reclaim the leaked GPU node
+
+**Required, not optional.** The task timeout kills the task; it does **not** kill the notebook
+container. A hung run leaves a `GPU_NV_S` node running **indefinitely** — the service has
+`auto_suspend_secs = 0`, and the pool's `AUTO_SUSPEND = 3600` only counts *idle* time, which a
+RUNNING service prevents. Observed 2026-08-19: task died 16:22:06, container still `RUNNING` at
+16:57 (65 minutes total) and had to be stopped by hand.
+
+Check whenever the dashboard shows `HUNG (work saved)`, or after any task that FAILED with
+transcripts present:
+
+```sql
+-- num_services > 0 with no run in progress means a container is leaked
+SHOW COMPUTE POOLS LIKE 'TRANSCRIPTION_GPU_POOL_V2';
+SHOW SERVICES IN COMPUTE POOL TRANSCRIPTION_GPU_POOL_V2;   -- look for STPLATNOTEBOOK*
+```
+
+Reclaim it:
+
+```sql
+ALTER COMPUTE POOL TRANSCRIPTION_GPU_POOL_V2 STOP ALL;
+ALTER COMPUTE POOL TRANSCRIPTION_GPU_POOL_V2 SUSPEND;
+SHOW COMPUTE POOLS LIKE 'TRANSCRIPTION_GPU_POOL_V2';       -- expect SUSPENDED, 0 nodes
+```
+
+`STOP ALL` stops every service and job on the pool, so confirm no legitimate run is in progress
+first — check the dashboard's Pipeline Status, or that `num_jobs = 0`. `auto_resume = true`, so the
+next task run brings the pool back normally; suspending costs nothing but a cold start.
+
+This is the most likely mechanism behind the historical ~230-credit runaway, and with 6 of 8
+multi-file runs hanging it recurs often. It goes away with the job-service port.
+
 ### Worked example: anonymous blocks ≠ stored procedures
 
 The Fix #1 gate procedure was originally written with `LS @stage` + `RESULT_SCAN`. The logic

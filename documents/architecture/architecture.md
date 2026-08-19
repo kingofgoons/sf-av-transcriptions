@@ -163,7 +163,13 @@ signals the process to exit, so the task blocks to a ~8,100s transport timeout.
 - **Multi-file only:** 0/8 single-file runs hung; **6/8** multi-file runs did. Three 3-file runs
   on 2026-08-19 went hang / clean / hang within six hours — it is intermittent, so one clean
   run is not evidence of improvement.
-- Mitigation in place: `USER_TASK_TIMEOUT_MS = 1800000` caps the waste at 30 minutes.
+- Mitigation in place: `USER_TASK_TIMEOUT_MS = 1800000` caps the **task** at 30 minutes — but
+  **NOT the container.** Corrected 2026-08-19: the 15:52 hung run's task died at 16:22 while its
+  container held a `GPU_NV_S` node until manually stopped at 16:57. The service has
+  `auto_suspend_secs = 0` and the pool's `AUTO_SUSPEND = 3600` only counts *idle* time, which a
+  RUNNING service prevents — so **a hung run leaks a GPU node indefinitely.** After any hang run
+  `ALTER COMPUTE POOL TRANSCRIPTION_GPU_POOL_V2 STOP ALL;` then `SUSPEND`. See
+  [../operations/runbook.md](../operations/runbook.md) §6.
 - **Now observable**, since 2026-08-19: `V_TRANSCRIPTION_RUN_STATUS` surfaces the hang as
   `WORK_COMPLETE_NOT_EXITED` and the dashboard renders it as a distinct state, so the
   operator can see that the data is safe but the container is wedged.
@@ -189,7 +195,7 @@ a process in which none of our code is running. **What it does not prove:** why 
 signal never fires; the stacks show where the process waits, not what failed to notify it.
 
 The narrower claim matters, because "nothing we can do" is false at other layers: the task
-timeout bounds the cost, the dashboard detects it, and the job-service port deletes the failing
+timeout bounds the task (though **not** the container — see above), the dashboard detects it, and the job-service port deletes the failing
 stack — a headless script has no gRPC server, no Streamlit adaptor and no `run_till_end`.
 
 ## 6. Data model — `TRANSCRIPTION_RESULTS`
