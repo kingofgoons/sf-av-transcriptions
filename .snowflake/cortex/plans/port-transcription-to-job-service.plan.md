@@ -1,16 +1,18 @@
+---
+name: "port-transcription-to-job-service"
+created: "2026-08-19T16:23:34.191Z"
+status: pending
+---
+
 # Port transcription from EXECUTE NOTEBOOK to a headless GPU job service
 
 ## Context
 
 ### Why
 
-The ~2h07m hang is **not in our code, and this is now proven** rather than inferred.
+The \~2h07m hang is **not in our code, and this is now proven** rather than inferred.
 
-On 2026-08-19 a `faulthandler` watchdog was armed in the notebook teardown
-(`dump_traceback_later(120, repeat=True, exit=False)`, writing to a real fd via `sys.__stderr__`)
-and a hang was reproduced deliberately with the same 3-file workload that hung on 2026-08-18.
-The notebook finished all work and wrote its 3 rows normally, then dumps fired at +2min and
-+4min with an **identical** frame:
+On 2026-08-19 a `faulthandler` watchdog was armed in the notebook teardown (`dump_traceback_later(120, repeat=True, exit=False)`, writing to a real fd via `sys.__stderr__`) and a hang was reproduced deliberately with the same 3-file workload that hung on 2026-08-18. The notebook finished all work and wrote its 3 rows normally, then dumps fired at +2min and +4min with an **identical** frame:
 
 ```
 Thread 0x00007fcf7d7fa6c0:
@@ -24,31 +26,17 @@ MAIN THREAD:
   snowbook/web/cli.py:211 in main
 ```
 
-`snowbook`'s script runner parks forever in `on_scriptrunner_ready` waiting on a condition
-variable while the main thread sits in `asyncio run_forever` serving gRPC. **No notebook code is
-on any stack** — every cell has completed. This is inside Snowflake's runtime and cannot be
-fixed from the notebook. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
+`snowbook`'s script runner parks forever in `on_scriptrunner_ready` waiting on a condition variable while the main thread sits in `asyncio run_forever` serving gRPC. **No notebook code is on any stack** — every cell has completed. This is inside Snowflake's runtime and cannot be fixed from the notebook. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
 
-**The hang is multi-file-only:** 0 of 8 single-file runs hung; 4 of 6 multi-file runs did. Any
-reproduction must use 3+ files.
+**The hang is multi-file-only:** 0 of 8 single-file runs hung; 4 of 6 multi-file runs did. Any reproduction must use 3+ files.
 
-Three earlier hypotheses were **disproven** by the hung-run stacks and must not be
-re-investigated: lingering multiprocessing children (zero on every dump), GPU/CUDA cleanup (the
-hung run had cleanup and hung anyway), and `join_if_started` (present in healthy baselines
-only). The `resource_tracker: leaked semaphore` warning appears on healthy runs too and is
-noise.
+Three earlier hypotheses were **disproven** by the hung-run stacks and must not be re-investigated: lingering multiprocessing children (zero on every dump), GPU/CUDA cleanup (the hung run had cleanup and hung anyway), and `join_if_started` (present in healthy baselines only). The `resource_tracker: leaked semaphore` warning appears on healthy runs too and is noise.
 
-The port remains the right move, and the evidence strengthens it: a plain Python script has no
-`snowbook` script runner, no Streamlit host, and no IPython kernel, so it removes the entire
-failure class rather than betting on a specific thread.
+The port remains the right move, and the evidence strengthens it: a plain Python script has no `snowbook` script runner, no Streamlit host, and no IPython kernel, so it removes the entire failure class rather than betting on a specific thread.
 
-Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all
-Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
+Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
 
-**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped)
-caps the waste. Rows still land before the hang, so the data is correct while the task reports
-FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed
-notebook and should be turned off once the port lands.
+**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped) caps the waste. Rows still land before the hang, so the data is correct while the task reports FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed notebook and should be turned off once the port lands.
 
 ### Key findings from research
 
@@ -60,7 +48,7 @@ snowflake/images/snowflake_images/st_plat/runtime/x86/generic_gpu/runtime_image/
 
 This is the same `snowbooks` image family the notebook already runs on. Newer tags (2.7.0, 2.8.0) are py312-only; the notebook logs show `cpython-3.10`, so a `py310` tag matches the validated environment. `2.5.1-py310` is the newest py310.
 
-**ffmpeg is already preinstalled** — telemetry confirms `ffmpeg version 6.1.1-3ubuntu5` plus `ffprobe` on every run. The `apt-get` fallback in notebook cell 8 has never fired, and [scripts/install_ffmpeg.sh](scripts/install_ffmpeg.sh) is vestigial. This matters because job service containers are **non-privileged**, so `apt-get` would not have worked. Since we reuse the same image, ffmpeg comes for free and no static-binary or pip-wheel workaround is needed.
+**ffmpeg is already preinstalled** — telemetry confirms `ffmpeg version 6.1.1-3ubuntu5` plus `ffprobe` on every run. The `apt-get` fallback in notebook cell 8 has never fired, and scripts/install\_ffmpeg.sh is vestigial. This matters because job service containers are **non-privileged**, so `apt-get` would not have worked. Since we reuse the same image, ffmpeg comes for free and no static-binary or pip-wheel workaround is needed.
 
 **Authentication inside the container differs from the notebook.** `get_active_session()` will not be available. Job service containers get an OAuth token file:
 
@@ -85,7 +73,7 @@ The session runs as the **service owner role**. The token file is refreshed ever
 
 ### Notebook inventory
 
-~1,312 lines of code across 19 code cells: ~1,027 essential, ~261 presentation-only, ~24 redundant. Realistic target is **650-750 lines** of headless Python. The work concentrates in a few places:
+\~1,312 lines of code across 19 code cells: \~1,027 essential, \~261 presentation-only, \~24 redundant. Realistic target is **650-750 lines** of headless Python. The work concentrates in a few places:
 
 - Cell 19 (`helper_functions`, 462 lines) is pure functions with no notebook coupling and ports nearly verbatim. It contains the load-bearing `import re`.
 - Cell 5 session bootstrap must be rewritten (OAuth instead of `get_active_session`, drop `session.use_role("SYSADMIN")`, drop the unused `Root(session)`).
@@ -166,9 +154,7 @@ Create `scripts/payload/transcribe_job.py`:
 
 Add `scripts/payload/requirements.txt` with `openai-whisper` and `pandas`.
 
-The Cortex model is **`claude-sonnet-4-6`**, verified against notebook line 1007. The earlier
-`claude-opus-4-5` reference in agents.md was stale documentation and has been corrected — port
-the notebook's value, and read it from config rather than hardcoding it again.
+The Cortex model is **`claude-sonnet-4-6`**, verified against notebook line 1007. The earlier `claude-opus-4-5` reference in agents.md was stale documentation and has been corrected — port the notebook's value, and read it from config rather than hardcoding it again.
 
 ### 4. Validate the payload locally against a clone
 
@@ -182,11 +168,11 @@ The real `TRANSCRIPTION_RESULTS` is never written during this phase.
 
 ### 5. Wire the launch path
 
-- Add to [scripts/00_config.sql](scripts/00_config.sql) (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with [scripts/publish_config.sh](scripts/publish_config.sh).
+- Add to scripts/00\_config.sql (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with scripts/publish\_config.sh.
 - Reuse `NOTEBOOK_STAGE` for the payload or add a dedicated payload stage; either way pin the name in config, not inline.
 - Author the service specification: one container on the snowbooks GPU image, `command` running `pip install -r requirements.txt && python transcribe_job.py`, a `stage` volume for the payload and one for `AUDIO_VIDEO_STAGE`, `resources` requesting `nvidia.com/gpu`, and env vars carrying the database/schema/table names.
-- Modify [scripts/03_automate.sql](scripts/03_automate.sql) per task 2. While in that file, wrap its bare `DECLARE...END;` blocks in `EXECUTE IMMEDIATE $$ ... $$` so it survives `snow sql -f` (existing known issue).
-- Add a deploy script for the payload mirroring the verify-after-deploy discipline now in [scripts/04_deploy_notebook.sh](scripts/04_deploy_notebook.sh): upload, then confirm the staged bytes match local. Do not repeat the mistake of trusting an upload as proof of deployment.
+- Modify scripts/03\_automate.sql per task 2. While in that file, wrap its bare `DECLARE...END;` blocks in `EXECUTE IMMEDIATE $$ ... $$` so it survives `snow sql -f` (existing known issue).
+- Add a deploy script for the payload mirroring the verify-after-deploy discipline now in scripts/04\_deploy\_notebook.sh: upload, then confirm the staged bytes match local. Do not repeat the mistake of trusting an upload as proof of deployment.
 
 ### 6. End-to-end validation
 
@@ -199,17 +185,20 @@ Retire the headless notebook path while keeping the notebook for interactive use
 ## Verification
 
 **Spike gates (task 1)** — do not proceed unless all pass:
+
 - `which ffmpeg` and `which ffprobe` both resolve; `ffmpeg -version` reports 6.x
 - `torch.cuda.is_available()` is True and names a GPU
 - OAuth session returns the expected role and a row count of 443
 - The mounted AV stage volume lists media files
 
 **Payload parity (task 4):**
+
 - All 23 columns populated on the clone; `SUMMARY_MARKDOWN` and `MEETING_TITLE` non-null
 - `PROCESSING_TIME_SECONDS / AUDIO_DURATION_SECONDS` ratio in the historical 0.035-0.055 band, confirming GPU execution
 - Re-running with the file already present inserts nothing
 
 **End-to-end (task 6):**
+
 - Task `SUCCEEDED` with a real `RETURN_VALUE`, not `FAILED`
 - Task duration approximately equals actual work time (expect roughly 2-4 minutes for an 8-minute recording), with **no multi-hour tail**
 - Container exits on its own; no `092848 UNAVAILABLE` and no forced exit involved
@@ -219,16 +208,12 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 **Regression guard:** confirm `TRANSCRIPTION_RESULTS` never drops below its pre-change count at any point. Take a zero-copy clone as a backup before the first write to the real table, matching the `TR_BACKUP_GOOD` pattern already in use.
 
-**Honest success criterion:** the hang is multi-file-specific — 4 of 6 multi-file runs hung, 0 of
-8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in
-the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only
-after several consecutive multi-file runs with no multi-hour tail. Keep the
-`USER_TASK_TIMEOUT_MS` cap in place until then.
+**Honest success criterion:** the hang is multi-file-specific — 4 of 6 multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only after several consecutive multi-file runs with no multi-hour tail. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then.
 
 ## Critical files
 
-- [notebooks/audio_video_transcription.ipynb](notebooks/audio_video_transcription.ipynb) - source of the payload logic; cell 19 (462 lines) ports near-verbatim, cell 28 holds the authoritative 23-column INSERT
-- [scripts/03_automate.sql](scripts/03_automate.sql) - gate procedure and task definition; where `EXECUTE NOTEBOOK` becomes `EXECUTE JOB SERVICE`
-- [scripts/00_config.sql](scripts/00_config.sql) - single source of truth for all object names; new job/image variables go here and nowhere else
-- [scripts/04_deploy_notebook.sh](scripts/04_deploy_notebook.sh) - the deploy-then-verify pattern the new payload deploy script should mirror
-- [av.uploader/upload_av_files.py](av.uploader/upload_av_files.py) - trigger path; should require no changes, which is itself worth verifying
+- notebooks/audio\_video\_transcription.ipynb - source of the payload logic; cell 19 (462 lines) ports near-verbatim, cell 28 holds the authoritative 23-column INSERT
+- scripts/03\_automate.sql - gate procedure and task definition; where `EXECUTE NOTEBOOK` becomes `EXECUTE JOB SERVICE`
+- scripts/00\_config.sql - single source of truth for all object names; new job/image variables go here and nowhere else
+- scripts/04\_deploy\_notebook.sh - the deploy-then-verify pattern the new payload deploy script should mirror
+- av.uploader/upload\_av\_files.py - trigger path; should require no changes, which is itself worth verifying

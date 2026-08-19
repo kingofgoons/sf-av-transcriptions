@@ -25,6 +25,11 @@ av.uploader/config.json
 # Cortex Code local files
 .cortex/
 
+# Retired plans — kept locally for reference, not version controlled.
+# Active plans under .snowflake/cortex/plans/ ARE tracked. Evidence worth keeping
+# (e.g. the hang root-cause stacks) is carried in the active plan that supersedes them.
+.snowflake/cortex/plans/completed/
+
 # Streamlit local secrets (credentials — never commit)
 .streamlit/secrets.toml
 
