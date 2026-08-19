@@ -16,16 +16,13 @@
 
         <!-- ===== Local machine boundary ===== -->
         <mxCell id="local-boundary" value="Local Machine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=12;fontStyle=1;verticalAlign=top;opacity=60;dashed=1;" vertex="1" parent="1">
-          <mxGeometry x="40" y="100" width="210" height="300" as="geometry" />
+          <mxGeometry x="40" y="100" width="210" height="235" as="geometry" />
         </mxCell>
         <mxCell id="local-files" value="AUDIO_VIDEO_STAGE_FILES/&#xa;.mp4 / .mp3 recordings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="60" y="140" width="170" height="55" as="geometry" />
         </mxCell>
         <mxCell id="uploader" value="av.uploader/&#xa;upload_av_files.py&#xa;&#xa;key-pair auth as&#xa;AV_UPLOADER_SERVICE_USER" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="60" y="225" width="170" height="90" as="geometry" />
-        </mxCell>
-        <mxCell id="dashboard-local" value="streamlit/&#xa;transcription_dashboard.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
-          <mxGeometry x="60" y="335" width="170" height="50" as="geometry" />
         </mxCell>
 
         <!-- ===== External source: Snowhouse (Gong) ===== -->
@@ -69,7 +66,7 @@
         </mxCell>
 
         <!-- ===== Storage ===== -->
-        <mxCell id="results" value="TRANSCRIPTION_RESULTS&#xa;443 rows &#183; 23 columns&#xa;transcript, SRT, speakers,&#xa;summary fields" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+        <mxCell id="results" value="TRANSCRIPTION_RESULTS&#xa;444 rows &#183; 23 columns&#xa;transcript, SRT, speakers,&#xa;summary fields" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="1120" y="155" width="185" height="90" as="geometry" />
         </mxCell>
         <mxCell id="gong-mirror" value="GONG_CALLS_MIRROR&#xa;50 rows" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
@@ -99,6 +96,28 @@
         <!-- ===== Config store ===== -->
         <mxCell id="config-store" value="TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS&#xa;00_config.sql&#xa;&#xa;single source of truth for all object names&#xa;loaded via EXECUTE IMMEDIATE FROM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
           <mxGeometry x="320" y="440" width="200" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="config-view" value="V_PROJECT_CONFIG&#xa;&#xa;emitted BY 00_config.sql&#xa;owner's rights cannot read&#xa;session variables (090244),&#xa;so the app reads this view" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="320" y="575" width="200" height="95" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Progress telemetry ===== -->
+        <mxCell id="run-events" value="TRANSCRIPTION_RUN_EVENTS&#xa;append-only &#183; 18 columns&#xa;emitted per phase and per file step" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="665" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="run-status" value="V_TRANSCRIPTION_RUN_STATUS&#xa;DERIVED_STATE &#183; IS_ACTIVE&#xa;units done / total = completeness %&#xa;WORK_COMPLETE_NOT_EXITED = the hang" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="745" width="270" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Dashboard (a Snowflake object, not a local file) ===== -->
+        <mxCell id="dashboard" value="TRANSCRIPTION_DASHBOARD&#xa;transcription_dashboard_v3&#xa;&#xa;Streamlit, warehouse runtime&#xa;12 modules under streamlit/&#xa;reads results + run status&#xa;uploads media &#183; fires the task" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="660" width="210" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="app-role" value="TRANSCRIPTION_APP_ROLE&#xa;&#xa;owner's rights: every viewer runs as this role&#xa;read-only on data &#183; OPERATE on task&#xa;READ,WRITE on AV stage&#xa;GRANT OWNERSHIP ON STREAMLIT is unsupported,&#xa;so the app is recreated AS this role" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#7254A3;fontColor=#000000;fontFamily=Arial;fontSize=9;align=left;spacingLeft=6;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="800" width="430" height="90" as="geometry" />
         </mxCell>
 
         <!-- ===== Deprecated ===== -->
@@ -195,7 +214,31 @@
         <mxCell id="e-agent-mcp" style="endArrow=classic;html=1;strokeColor=#5AA8B0;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="agent" target="mcp">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e-unified-dashboard" value="reads" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="unified" target="dashboard-local">
+        <mxCell id="e-unified-dashboard" value="reads" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="unified" target="dashboard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-notebook-events" value="progress events" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="notebook" target="run-events">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-events-status" value="latest per run" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="run-events" target="run-status">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-status-dashboard" value="live run state" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="run-status" target="dashboard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-dashboard-stage" value="put_stream upload&#xa;&#8804; 200 MB hard cap&#xa;+ ALTER STAGE REFRESH" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="dashboard" target="av-stage">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-dashboard-task" value="EXECUTE TASK&#xa;(guarded on IS_ACTIVE)" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="dashboard" target="task">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-approle-dashboard" value="runs as" style="endArrow=classic;html=1;strokeColor=#7254A3;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="app-role" target="dashboard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-config-view" value="emits" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="config-store" target="config-view">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-configview-dashboard" value="object names&#xa;(no drift)" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="config-view" target="dashboard">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="e-config-gate" value="object names" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="config-store" target="gate">

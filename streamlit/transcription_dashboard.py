@@ -21,7 +21,7 @@ import streamlit as st
 import sf_config
 from sf_config import get_snowflake_connection
 from sf_data import load_transcription_data, get_summary_stats
-from sf_pipeline import render_status_panel
+from sf_pipeline import render_status_panel, render_controls
 from sf_theme import inject_css, brand_header
 
 import tab_overview
@@ -106,7 +106,15 @@ def main():
     st.subheader("⚙️ Pipeline Status")
 
     def _status_block():
-        render_status_panel(session, refresh_stage=deep_refresh)
+        # render_controls reuses the state the panel already computed, so the panel and the
+        # buttons can never disagree about whether a run is active.
+        run, backlog, n_backlog, state = render_status_panel(
+            session, refresh_stage=deep_refresh)
+        render_controls(session, run, n_backlog, state)
+
+        if n_backlog:
+            with st.expander(f"{n_backlog} file(s) waiting to be transcribed"):
+                st.dataframe(backlog, use_container_width=True, hide_index=True)
 
     if auto_refresh and hasattr(st, 'fragment'):
         st.fragment(run_every="5s")(_status_block)()

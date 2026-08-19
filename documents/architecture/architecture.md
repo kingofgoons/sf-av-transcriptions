@@ -27,40 +27,53 @@ AUDIO_VIDEO_STAGE_FILES/
       |   - skips files already in stage
       v
   @AUDIO_VIDEO_STAGE  ------------------------------+
-      |                                            |
-      | EXECUTE TASK (fired by the uploader)       |
-      v                                            |
-  TRANSCRIBE_NEW_FILES_TASK_V2 (no schedule)       |
-      |                                            |
-      | CALL                                       |
-      v                                            |
-  TRANSCRIBE_IF_NEW_FILES()  <---- gate -----------+
-      |   ALTER STAGE REFRESH + DIRECTORY() diff vs TRANSCRIPTION_RESULTS
-      |   no new files -> return SKIPPED, nothing launched
-      |   new files    -> EXECUTE NOTEBOOK (synchronous)
-      v
-  TRANSCRIBE_AV_FILES_V2  (GPU notebook on TRANSCRIPTION_GPU_POOL_V2)
-      |   pip install openai-whisper
-      |   GET files from stage -> whisper.load_model('base') -> transcribe
-      |   SNOWFLAKE.CORTEX.COMPLETE -> markdown summary -> parsed into fields
-      v
-  TRANSCRIPTION_RESULTS (443 rows)                 GONG_CALLS_MIRROR (50 rows)
-      |                                                   ^
-      |                                                   | scripts/06_sync_gong.sh
-      |                                                   | MERGE from Snowhouse
-      +---------------------+-----------------------------+
-                            v
-                    UNIFIED_MEETINGS_V  (LOCAL 443 + GONG 50 = 493)
-                            |
-            +---------------+----------------+------------------+
-            v               v                v                  v
-      MEETING_SEARCH   MEETINGS_          MEETING_          streamlit/
-      (Cortex Search)  SEMANTIC_VIEW      INTELLIGENCE      dashboard
-      TARGET_LAG 1hr   (Cortex Analyst)   (Cortex Agent)
-                                                |
-                                          MEETING_INTELLIGENCE_MCP
-                                          (MCP server for agent clients)
+      ^     |                                      |
+      |     | EXECUTE TASK (uploader, or dashboard) |
+      |     v                                      |
+      |  TRANSCRIBE_NEW_FILES_TASK_V2 (no schedule)|
+      |     |   ALLOW_OVERLAPPING_EXECUTION = FALSE  <- the real concurrency guard
+      |     | CALL                                 |
+      |     v                                      |
+      |  TRANSCRIBE_IF_NEW_FILES()  <-- gate ------+
+      |     |   ALTER STAGE REFRESH + DIRECTORY() diff vs TRANSCRIPTION_RESULTS
+      |     |   no new files -> return SKIPPED, nothing launched
+      |     |   new files    -> EXECUTE NOTEBOOK (synchronous)
+      |     v
+      |  TRANSCRIBE_AV_FILES_V2  (GPU notebook on TRANSCRIPTION_GPU_POOL_V2)
+      |     |   pip install openai-whisper
+      |     |   GET files from stage -> whisper.load_model('base') -> transcribe
+      |     |   SNOWFLAKE.CORTEX.COMPLETE -> markdown summary -> parsed into fields
+      |     |
+      |     +--> TRANSCRIPTION_RUN_EVENTS (append-only progress telemetry)
+      |     |          |
+      |     |          v
+      |     |    V_TRANSCRIPTION_RUN_STATUS (DERIVED_STATE, IS_ACTIVE)
+      |     |          |
+      |     v          |
+      |  TRANSCRIPTION_RESULTS (444 rows)          GONG_CALLS_MIRROR (50 rows)
+      |     |          |                                  ^
+      |     |          |                                  | scripts/06_sync_gong.sh
+      |     |          |                                  | MERGE from Snowhouse
+      |     +----------|------------+---------------------+
+      |                |            v
+      |                |    UNIFIED_MEETINGS_V  (LOCAL 444 + GONG 50 = 494)
+      |                |            |
+      |                |  +---------+---------+------------------+
+      |                |  v         v         v                  v
+      |                | MEETING_  MEETINGS_  MEETING_      TRANSCRIPTION_DASHBOARD
+      |                | SEARCH    SEMANTIC_  INTELLIGENCE   (transcription_dashboard_v3)
+      |                |  (Search)   VIEW      (Agent)        owner TRANSCRIPTION_APP_ROLE
+      |                |  LAG 1hr  (Analyst)      |                 |
+      |                |                          v                 |
+      |                +--------- status ---------|--- MEETING_INTELLIGENCE_MCP
+      |                                           |    (MCP server for agent clients)
+      +---- put_stream upload (<= 200 MB) --------+
+            EXECUTE TASK kickoff (guarded)
 ```
+
+The dashboard is both a consumer and a control surface: it reads `TRANSCRIPTION_RESULTS` and
+`V_TRANSCRIPTION_RUN_STATUS`, and it can write media to the AV stage and fire the task. It
+never writes `TRANSCRIPTION_RESULTS` or `TRANSCRIPTION_RUN_EVENTS` — only the notebook does.
 
 ## 3. Object inventory
 
@@ -85,6 +98,8 @@ below should be hard-coded anywhere else.
 | `TRANSCRIBE_AV_FILES_V2` | Notebook | GPU Container Runtime (cpython-3.10), Whisper `base`. SYSADMIN-owned |
 | `SNOWFLAKE.CORTEX.COMPLETE` | Cortex LLM | Model **`claude-sonnet-4-6`**, called once per file, ~25-50s each. Transcript truncated to 28,000 chars. Verified against the notebook source 2026-08-19 (`agents.md` previously claimed `claude-opus-4-5` — stale) |
 | `TRANSCRIPTION_RESULTS` | Table | 23 columns. Transcript, SRT, speaker segments, and parsed summary fields |
+| `TRANSCRIPTION_RUN_EVENTS` | Table | 18 columns, **append-only** progress telemetry emitted by the notebook. SYSADMIN-owned. No UPDATE path by design, so a wedged container cannot rewrite history |
+| `V_TRANSCRIPTION_RUN_STATUS` | View | Latest event per run plus `DERIVED_STATE` / `IS_ACTIVE`. This is where `WORK_COMPLETE_NOT_EXITED` (the hang) is derived from heartbeat age. SYSADMIN-owned |
 | `TRANSCRIPTION_SUMMARY` | View | Aggregate stats by file type and language |
 
 ### Consumption
@@ -97,12 +112,15 @@ below should be hard-coded anywhere else.
 | `MEETINGS_SEMANTIC_VIEW` | Semantic view | Cortex Analyst model for meeting analytics (frequency, duration, talk ratio, coverage) |
 | `MEETING_INTELLIGENCE` | Cortex Agent | Conversational interface over the above |
 | `MEETING_INTELLIGENCE_MCP` | MCP server | Exposes the agent to MCP clients. This project's own server — not an independent source |
+| `TRANSCRIPTION_DASHBOARD` | Streamlit | Warehouse runtime, title `transcription_dashboard_v3`, owned by **`TRANSCRIPTION_APP_ROLE`**. 12 modules under `streamlit/`. Reads results and run status; can trigger the task and upload to the AV stage. See **[dashboard.md](dashboard.md)** |
 
 ### Deploy / config
 
 | Object | Type | Notes |
 |---|---|---|
 | `TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS` | Stage | Holds `00_config.sql`. Every script loads it with `EXECUTE IMMEDIATE FROM`, which runs in the same session so `SET` variables persist |
+| `TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG` | View | Emitted by `00_config.sql` itself, projecting the configured names as one row. Exists because owner's-rights contexts **cannot read session variables** (`090244`), so the dashboard cannot run `00_config.sql` — it reads this view instead. Keeps the app off a second copy of the names |
+| `TRANSCRIPTION_APP_ROLE` | Role | Least-privilege owner of the Streamlit app. Granted to SYSADMIN so ACCOUNTADMIN inherits. Read-only on data; `OPERATE` on the task; `READ, WRITE` on the AV stage. **Note `GRANT OWNERSHIP ON STREAMLIT` is unsupported** — the app must be recreated as this role, which `09_deploy_dashboard.sh` does |
 | `AV_UPLOADER_SERVICE_USER` / `_ROLE` | User / role | Key-pair auth for the uploader. Needs WRITE on the AV stage and `OPERATE` on the task |
 
 ### Deprecated — keep suspended
@@ -142,11 +160,16 @@ signals the process to exit, so the task blocks to a ~8,100s transport timeout.
   not this project's code.
 - **Multi-file only:** 0/8 single-file runs hung; 4/6 multi-file runs did.
 - Mitigation in place: `USER_TASK_TIMEOUT_MS = 1800000` caps the waste at 30 minutes.
+- **Now observable**, since 2026-08-19: `V_TRANSCRIPTION_RUN_STATUS` surfaces the hang as
+  `WORK_COMPLETE_NOT_EXITED` and the dashboard renders it as a distinct state, so the
+  operator can see that the data is safe but the container is wedged.
 - The architectural fix is to move the payload off `EXECUTE NOTEBOOK` to a headless GPU job
   (`EXECUTE JOB SERVICE` on the same `snowbooks` GPU image), which removes the runtime
   entirely. See `.snowflake/cortex/plans/port-transcription-to-job-service.plan.md`.
 
-Full evidence is in `DIARY.md` (2026-08-19).
+Full evidence is in `DIARY.md` (2026-08-19). The instrumentation that makes it observable is
+documented in [dashboard.md](dashboard.md) §5, including why the notebook **cannot** report
+its own clean exit.
 
 ## 6. Data model — `TRANSCRIPTION_RESULTS`
 
@@ -226,3 +249,10 @@ Regenerate these whenever this file changes, using the `drawio-diagrams` skill.
 | `architecture.drawio` | Compressed output for draw.io / LucidChart import |
 
 Import into LucidChart via File -> Import.
+
+## 11. Related documents
+
+| Document | Covers |
+|---|---|
+| [dashboard.md](dashboard.md) | The Streamlit app: module layout, owner's-rights capability matrix, status/controls, theming, deploy, and port notes |
+| [../operations/runbook.md](../operations/runbook.md) | Day-to-day operation, deploys, recovery |

@@ -131,9 +131,54 @@ cd scripts/
 
 ## 5. Dashboard and exports
 
+The dashboard lives in `streamlit/` as 12 modules and runs in Snowflake as
+`TRANSCRIPTION_DASHBOARD` (title `transcription_dashboard_v3`). Full reference:
+[../architecture/dashboard.md](../architecture/dashboard.md).
+
+### Deploying it
+
 ```bash
-streamlit run transcription_dashboard.py       # local dashboard
-cd av.uploader/ && python download_srts.py     # bulk SRT export
+cd scripts/
+./09_deploy_dashboard.sh          # pre-flight, upload, recreate as app role, verify
+```
+
+**This is the only supported deploy path.** It runs `lint_dashboard.py` first, clears stale
+staged modules, recreates the app **as `TRANSCRIPTION_APP_ROLE`**, then verifies every file
+by download-and-diff and asserts the owner. Do not hand-deploy with
+`snow streamlit deploy`: it requires `CREATE STAGE`, which the app role deliberately lacks,
+and it will not set the owner correctly.
+
+Do not skip the pre-flight. It exists because a hand-deploy shipped two undefined-name bugs
+that `python -m compileall` passed — compiling proves a module *parses*, not that the names
+it references exist.
+
+**`CREATE OR REPLACE` assigns a new `url_id`**, so bookmarked direct links 404 after every
+deploy. Navigate via **Projects » Streamlit**.
+
+### Operating it
+
+| Control | Notes |
+|---|---|
+| Pipeline Status panel | Live run state, phase (n of 6), and a measured completeness %. Not an estimate — units are counted only when work actually finishes |
+| Auto-refresh | Sidebar toggle, **defaults OFF**. Each poll costs queries |
+| Rescan stage | Opt-in `ALTER STAGE REFRESH`. Walks all 300+ files, so it is not on the auto-refresh path |
+| Start transcription | Fires `EXECUTE TASK`. Disabled while a run is active or the backlog is empty. Real concurrency protection is the task's `ALLOW_OVERLAPPING_EXECUTION = FALSE`, not the button |
+| Upload media | **200 MB per file, hard cap** — a warehouse-runtime limit, not configurable. Roughly 18% of existing recordings exceed it; those must go through `av.uploader` |
+
+Upload does **not** trigger a run. Press **Start transcription** afterwards.
+
+There is **no delete-file control and cannot be one**: owner's-rights contexts reject
+`REMOVE` (`Unsupported statement type 'REMOVE_FILES'`). Remove stage files from your own
+session, then `ALTER STAGE … REFRESH` to clear the directory entry.
+
+If the status panel shows `WORK_COMPLETE_NOT_EXITED`, the transcripts are already committed
+and the container is wedged — this is the snowbook hang, not data loss. See §6.
+
+### Local / export
+
+```bash
+streamlit run streamlit/transcription_dashboard.py   # needs st.connection, not SiS session
+cd av.uploader/ && python download_srts.py           # bulk SRT export
 ```
 
 ---
