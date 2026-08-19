@@ -28,7 +28,12 @@ MAIN THREAD:
 
 `snowbook`'s script runner parks forever in `on_scriptrunner_ready` waiting on a condition variable while the main thread sits in `asyncio run_forever` serving gRPC. **No notebook code is on any stack** — every cell has completed. This is inside Snowflake's runtime and cannot be fixed from the notebook. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
 
-**The hang is multi-file-only:** 0 of 8 single-file runs hung; 4 of 6 multi-file runs did. Any reproduction must use 3+ files.
+**The hang is multi-file-only:** 0 of 8 single-file runs hung; **6 of 8** multi-file runs did
+(updated 2026-08-19). Any reproduction must use 3+ files.
+
+**It is intermittent — one clean run proves nothing.** Three 3-file runs on 2026-08-19 went
+hang (10:07) / clean (15:21) / hang (15:52) within six hours. That clean run was nearly read as
+the problem receding.
 
 Three earlier hypotheses were **disproven** by the hung-run stacks and must not be re-investigated: lingering multiprocessing children (zero on every dump), GPU/CUDA cleanup (the hung run had cleanup and hung anyway), and `join_if_started` (present in healthy baselines only). The `resource_tracker: leaked semaphore` warning appears on healthy runs too and is noise.
 
@@ -36,7 +41,9 @@ The port remains the right move, and the evidence strengthens it: a plain Python
 
 Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
 
-**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped) caps the waste. Rows still land before the hang, so the data is correct while the task reports FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed notebook and should be turned off once the port lands.
+**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped) caps the waste. Rows still land before the hang, so the data is correct while the task reports FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed notebook — **leave it armed until the port is validated**; it produced the live 11-cycle stack capture on 2026-08-19 that proved the root cause, and it costs nothing on healthy runs (one baseline dump).
+
+**The terminal error is not a stable signature.** Do not key validation or alerting on one error code. The 10:07 hang died at 1045s with error **604** "SQL execution canceled"; the 15:52 hang ran the full timeout and died at 1802s with error **000630** "Statement reached its statement or warehouse timeout of 1,800 second(s)". Neither message mentions notebooks or hanging. The durable signal is *transcripts present + task FAILED*, and the reliable tell is the gap between the last transcript write and the task end (7.5 min and ~10 min respectively) — not duration.
 
 ### Key findings from research
 
@@ -73,9 +80,9 @@ The session runs as the **service owner role**. The token file is refreshed ever
 
 ### Notebook inventory
 
-\~1,312 lines of code across 19 code cells: \~1,027 essential, \~261 presentation-only, \~24 redundant. Realistic target is **650-750 lines** of headless Python. The work concentrates in a few places:
+\~**1,671** lines of code across 19 code cells (grew from \~1,312 when progress instrumentation was added on 2026-08-19). Realistic target is **650-750 lines** of headless Python, plus the progress emitter. The work concentrates in a few places:
 
-- Cell 19 (`helper_functions`, 462 lines) is pure functions with no notebook coupling and ports nearly verbatim. It contains the load-bearing `import re`.
+- Cell 19 (`helper_functions`) is pure functions with no notebook coupling and ports nearly verbatim. It contains the load-bearing `import re`. It was 462 lines when this plan was written and has since gained progress emissions — re-measure before estimating.
 - Cell 5 session bootstrap must be rewritten (OAuth instead of `get_active_session`, drop `session.use_role("SYSADMIN")`, drop the unused `Root(session)`).
 - Cells 26, 30, 31, 32, 35 and cell 10 are presentation-only and get dropped, including the entire teardown apparatus.
 - Cell 12 is a duplicate `openai-whisper` install and gets dropped.
@@ -166,9 +173,47 @@ Before any Snowflake wiring:
 
 The real `TRANSCRIPTION_RESULTS` is never written during this phase.
 
+### 4b. Port the progress instrumentation — REQUIRED, not optional
+
+**This step was missing from the original plan.** Without it the port silently kills a shipped
+feature: the dashboard's Pipeline Status panel reads `V_TRANSCRIPTION_RUN_STATUS`, which is fed
+*only* by the notebook's emissions. A payload that does not emit leaves every run showing `IDLE`,
+the kickoff button permanently enabled, and the completeness percentage blank — with no error
+anywhere to indicate why.
+
+Port `RunProgress` from notebook cell 5 into the payload. It was written to be portable (plain
+SQL INSERTs, no notebook APIs, `emit()` never raises), so this is close to a copy:
+
+- Keep the schema of `TRANSCRIPTION_RUN_EVENTS` **unchanged** — 18 columns, append-only. The
+  dashboard, the view and the derived-state logic all depend on it.
+- Set `RUN_SOURCE = 'JOB_SERVICE'` instead of `'NOTEBOOK'` so old and new runs are
+  distinguishable in history. Confirm the panel renders an unrecognised `RUN_SOURCE` gracefully
+  — it is displayed as free text, so it should, but check rather than assume.
+- Preserve the unit arithmetic exactly: `UNITS_TOTAL = 4 + (files × 4)`, with the four global
+  units and four per-file steps (`EXTRACT_AUDIO`, `TRANSCRIBE`, `GENERATE_SRT`,
+  `GENERATE_SUMMARY`). `finish_file()` must still snap to `baseline + 4` regardless of outcome,
+  or a skipped or failed file leaves the percentage permanently short of 100%.
+- Keep the six phases (`STARTUP`, `DISCOVER`, `DOWNLOAD`, `TRANSCRIBE`, `PERSIST`, `COMPLETE`)
+  and `PHASE_TOTAL = 6`; `sf_config.PHASE_TOTAL` hardcodes 6.
+- **Emit a real terminal state.** This is the one place the port should NOT copy the notebook.
+  The notebook cannot report its own clean exit — the hang happens after the last cell — so its
+  terminal state is `CELLS_COMPLETE` and the dashboard has to cross-check `TASK_HISTORY` to tell
+  "finished" from "wedged". A headless script *can* report its own exit, so emit `SUCCEEDED` as
+  the last statement before exit. Then `WORK_COMPLETE_NOT_EXITED` becomes genuinely diagnostic
+  rather than routine: seeing it after the port would mean the job service has its own
+  exit problem.
+- Note the dashboard's `STARTING` state derives from "task EXECUTING, newest run terminal, last
+  heartbeat older than task elapsed". That logic is launch-mechanism agnostic and should keep
+  working, but the pre-emit window will change — a job service has no `pip install
+  openai-whisper` ahead of the first emit if the image carries the deps, so `STARTING` may last
+  seconds instead of 60-180s. Verify it does not flicker.
+
+Validate on the clone run in task 4: the event stream should reach exactly `UNITS_DONE ==
+UNITS_TOTAL` and `PCT_COMPLETE = 100.0`, with all four per-file steps present for every file.
+
 ### 5. Wire the launch path
 
-- Add to scripts/00\_config.sql (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with scripts/publish\_config.sh.
+- Add to scripts/00\_config.sql (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with scripts/publish\_config.sh. **Also extend the `V_PROJECT_CONFIG` emitter at the bottom of that file** with the new names — it did not exist when this plan was written and is now how the dashboard resolves object names without drift.
 - Reuse `NOTEBOOK_STAGE` for the payload or add a dedicated payload stage; either way pin the name in config, not inline.
 - Author the service specification: one container on the snowbooks GPU image, `command` running `pip install -r requirements.txt && python transcribe_job.py`, a `stage` volume for the payload and one for `AUDIO_VIDEO_STAGE`, `resources` requesting `nvidia.com/gpu`, and env vars carrying the database/schema/table names.
 - Modify scripts/03\_automate.sql per task 2. While in that file, wrap its bare `DECLARE...END;` blocks in `EXECUTE IMMEDIATE $$ ... $$` so it survives `snow sql -f` (existing known issue).
@@ -188,14 +233,26 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 - `which ffmpeg` and `which ffprobe` both resolve; `ffmpeg -version` reports 6.x
 - `torch.cuda.is_available()` is True and names a GPU
-- OAuth session returns the expected role and a row count of 443
+- OAuth session returns the expected role and a row count matching `TRANSCRIPTION_RESULTS` at the time of the spike (**447 as of 2026-08-19** — read it live rather than asserting a literal, since this number moves with every run)
 - The mounted AV stage volume lists media files
 
 **Payload parity (task 4):**
 
 - All 23 columns populated on the clone; `SUMMARY_MARKDOWN` and `MEETING_TITLE` non-null
-- `PROCESSING_TIME_SECONDS / AUDIO_DURATION_SECONDS` ratio in the historical 0.035-0.055 band, confirming GPU execution
+- `PROCESSING_TIME_SECONDS / AUDIO_DURATION_SECONDS` ratio in the historical **0.006-0.090** band (median 0.037, mean 0.037, SD 0.0074 across 447 rows), confirming GPU execution. **Do not use a narrow 0.035-0.055 band** — an earlier draft of this plan did, and it would have failed a legitimate GPU run: the 26-minute Mediaocean file on 2026-08-19 came in at **0.0306**, below that floor. Short recordings run *high* because the Cortex summary is a near-fixed 25-50s cost that dominates; long ones run low. Sanity-check against duration, not a bare threshold.
 - Re-running with the file already present inserts nothing
+
+**Instrumentation parity (task 4b):**
+
+- `TRANSCRIPTION_RUN_EVENTS` receives events with `RUN_SOURCE = 'JOB_SERVICE'`
+- The run reaches exactly `UNITS_DONE == UNITS_TOTAL` and `PCT_COMPLETE = 100.0`; all four
+  per-file steps present for every file
+- A terminal `SUCCEEDED` event is emitted \u2014 the notebook could never do this, so its presence is
+  the signal that the port genuinely exits
+- The dashboard Pipeline Status panel renders the job-service run correctly, and the kickoff
+  button is blocked while it is active. **A blank or `IDLE` panel during a live run means the
+  instrumentation was not ported** \u2014 that is the specific silent failure this task exists to
+  prevent.
 
 **End-to-end (task 6):**
 
@@ -208,11 +265,11 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 **Regression guard:** confirm `TRANSCRIPTION_RESULTS` never drops below its pre-change count at any point. Take a zero-copy clone as a backup before the first write to the real table, matching the `TR_BACKUP_GOOD` pattern already in use.
 
-**Honest success criterion:** the hang is multi-file-specific — 4 of 6 multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only after several consecutive multi-file runs with no multi-hour tail. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then.
+**Honest success criterion:** the hang is multi-file-specific — **6 of 8** multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only after several consecutive multi-file runs with no multi-hour tail. Given the observed hang/clean/hang sequence within six hours on 2026-08-19, "several" means **at least 4 consecutive clean multi-file runs**, not one or two. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then.
 
 ## Critical files
 
-- notebooks/audio\_video\_transcription.ipynb - source of the payload logic; cell 19 (462 lines) ports near-verbatim, cell 28 holds the authoritative 23-column INSERT
+- notebooks/audio\_video\_transcription.ipynb - source of the payload logic; cell 19 ports near-verbatim, cell 28 holds the authoritative 23-column INSERT, cell 5 holds the `RunProgress` class that must port with it
 - scripts/03\_automate.sql - gate procedure and task definition; where `EXECUTE NOTEBOOK` becomes `EXECUTE JOB SERVICE`
 - scripts/00\_config.sql - single source of truth for all object names; new job/image variables go here and nowhere else
 - scripts/04\_deploy\_notebook.sh - the deploy-then-verify pattern the new payload deploy script should mirror
