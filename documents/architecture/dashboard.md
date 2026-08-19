@@ -287,10 +287,17 @@ Three numbers worth remembering:
 
 - **Normal teardown is ~11s** (clean run: last event 15:27:21, task returned 15:27:32). So
   `CELLS_COMPLETE` with the task still running past ~60s is a hang, not slow shutdown.
-- **A hang ends as `FAILED` with error 604, "SQL execution canceled"** — not a message
-  mentioning notebooks or timeouts. Do not chase a phantom SQL bug.
-- **The 1800s task timeout is not the ceiling in practice**; this one died at 1045s. Duration
-  alone is not the tell — the gap between the last transcript write and the task end is.
+- **The terminal error varies — do not key alerting on one code.** Two hangs on 2026-08-19 ended
+  differently: 10:07 died at **1045s, error 604** "SQL execution canceled"; 15:52 ran the full
+  timeout and died at **1802s, error 000630** "Statement reached its statement or warehouse
+  timeout of 1,800 second(s)". Neither message mentions notebooks or hanging. Key on
+  *transcripts present + task FAILED* instead.
+- **The reliable tell is the gap** between the last transcript write and the task end, not the
+  duration — 7.5 min and ~10 min respectively.
+
+This path was validated against a **live** hang on 2026-08-19 (the 15:52 run): the card correctly
+showed `HUNG (work saved)` while the container sat wedged for 30 minutes, and `_n()` rendered
+`16 of 16 units complete (100.0%)` with the per-file line suppressed rather than `File nan of nan`.
 
 ### Cost controls
 

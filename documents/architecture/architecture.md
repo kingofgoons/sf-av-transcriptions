@@ -156,9 +156,13 @@ Snowflake's `snowbook` runtime fails to exit: the script runner waits forever in
 `on_scriptrunner_ready` while the main thread sits in an asyncio loop serving gRPC. Nothing
 signals the process to exit, so the task blocks to a ~8,100s transport timeout.
 
-- Root-caused 2026-08-19 with `faulthandler` stack dumps. It is inside Snowflake's runtime,
-  not this project's code.
-- **Multi-file only:** 0/8 single-file runs hung; 4/6 multi-file runs did.
+- Root-caused 2026-08-19 with `faulthandler` stack dumps, and **re-confirmed against a live
+  hang the same day** — 11 dump cycles at 120s intervals, byte-identically sized stacks, and
+  **zero notebook frames** in any post-completion dump. It is inside Snowflake's runtime, not
+  this project's code.
+- **Multi-file only:** 0/8 single-file runs hung; **6/8** multi-file runs did. Three 3-file runs
+  on 2026-08-19 went hang / clean / hang within six hours — it is intermittent, so one clean
+  run is not evidence of improvement.
 - Mitigation in place: `USER_TASK_TIMEOUT_MS = 1800000` caps the waste at 30 minutes.
 - **Now observable**, since 2026-08-19: `V_TRANSCRIPTION_RUN_STATUS` surfaces the hang as
   `WORK_COMPLETE_NOT_EXITED` and the dashboard renders it as a distinct state, so the
@@ -170,6 +174,23 @@ signals the process to exit, so the task blocks to a ~8,100s transport timeout.
 Full evidence is in `DIARY.md` (2026-08-19). The instrumentation that makes it observable is
 documented in [dashboard.md](dashboard.md) §5, including why the notebook **cannot** report
 its own clean exit.
+
+**Two threads park, and neither is ever signalled.** The main thread blocks in `selectors.select`
+inside `asyncio run_forever`, reached via `snowbook/snowflake/snowflake_run_adaptor.py:264
+run_till_end`. The script-runner thread does **not** exit — it moves from executing the notebook
+to waiting in `snowbook/runtime/notebook_script_requests.py:232 on_scriptrunner_ready` for a next
+script request that never arrives. That frame is absent from the baseline dump and present in
+every dump afterwards, which marks the moment the hang begins.
+
+**What that proves:** the hang cannot be fixed from inside the notebook. Across 35 minutes of
+live telemetry exactly one stack frame belonged to project code — cell 35 calling
+`dump_traceback()` itself. No cell, teardown handler, `atexit` hook or thread cleanup can affect
+a process in which none of our code is running. **What it does not prove:** why the completion
+signal never fires; the stacks show where the process waits, not what failed to notify it.
+
+The narrower claim matters, because "nothing we can do" is false at other layers: the task
+timeout bounds the cost, the dashboard detects it, and the job-service port deletes the failing
+stack — a headless script has no gRPC server, no Streamlit adaptor and no `run_till_end`.
 
 ## 6. Data model — `TRANSCRIPTION_RESULTS`
 
