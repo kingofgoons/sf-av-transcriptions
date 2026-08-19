@@ -87,6 +87,34 @@ def main(app_dir):
               "navigation, which restructures the app. Use flat tab_*.py modules.")
         return 1
 
+    # environment.yml: required, and must not pin `python`.
+    #
+    # Required because with no environment.yml Snowflake resolves the OLDEST supported
+    # Streamlit (1.22.0), which breaks file_uploader, download_button, fragment and
+    # hide_index. The app still loads, so the failure is invisible without a check.
+    #
+    # `python=` is rejected because on a warehouse-runtime STREAMLIT object the entry is
+    # translated into a Python function package spec `python==3.11` - not a resolvable
+    # package - and the app dies at load with "Packages not found: python==3.11". The
+    # Snowflake docs show `- python=3.11` in their example, so this is an easy trap to walk
+    # back into. It took the app down on 2026-08-19.
+    env = app / 'environment.yml'
+    if not env.is_file():
+        print("FAIL: environment.yml missing from the source root. Without it Snowflake "
+              "resolves Streamlit 1.22.0 and several components break silently.")
+        return 1
+    env_lines = [ln.split('#', 1)[0].strip() for ln in env.read_text().splitlines()]
+    if any(re.match(r'^-\s*python\s*[=<>]', ln) for ln in env_lines):
+        print("FAIL: environment.yml pins `python`. On warehouse runtime this becomes the "
+              "package spec `python==3.11`, which does not resolve, and the app dies at "
+              "load with 'Packages not found: python==3.11'. Remove the python entry - the "
+              "base environment already provides 3.11.")
+        return 1
+    if not any(re.match(r'^-\s*streamlit\s*=\s*\d+\.\d+', ln) for ln in env_lines):
+        print("FAIL: environment.yml does not pin a streamlit version (expected e.g. "
+              "`- streamlit=1.52.2`). Unpinned means Snowflake resolves 1.22.0.")
+        return 1
+
     local = {p.stem for p in pyfiles}
     failures = []
 

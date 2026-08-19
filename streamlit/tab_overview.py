@@ -58,11 +58,22 @@ def render(df, stats):
     with col2:
         st.subheader("File Types")
         if not df.empty:
-            try:
-                st.bar_chart(df['FILE_TYPE'].value_counts())
-            except Exception as _chart_e:
-                st.error(f"[bar_chart: File Types] {type(_chart_e).__name__}: {_chart_e}")
-                st.code(traceback.format_exc())
+            # A table, not a bar chart: this is two or three categories with a count each.
+            # A chart adds axes and gridlines to convey what three numbers already say, and
+            # unlike the chart a table can carry the share column.
+            ft = df['FILE_TYPE'].value_counts()
+            st.dataframe(
+                pd.DataFrame({
+                    'Type': ft.index,
+                    'Files': ft.values,
+                    'Share': ft.values / len(df) * 100,
+                }),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    'Files': st.column_config.NumberColumn(format="%d"),
+                    'Share': st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
 
     st.divider()
 
@@ -89,12 +100,27 @@ def render(df, stats):
     # Language distribution
     st.subheader("Language Distribution")
     if not df.empty:
-        lang_counts = df['DETECTED_LANGUAGE'].value_counts().head(10)
-        try:
-            st.bar_chart(lang_counts)
-        except Exception as _chart_e:
-            st.error(f"[bar_chart: Language Distribution] {type(_chart_e).__name__}: {_chart_e}")
-            st.code(traceback.format_exc())
+        # Also a table. The corpus is overwhelmingly one language, so a bar chart is one
+        # tall bar next to a row of slivers - the long tail is the interesting part and a
+        # chart at that scale hides it. The table also carries audio hours, which answers
+        # "is this a real second language or three stray files?"
+        lang = df['DETECTED_LANGUAGE'].value_counts().head(10)
+        hours = (df.groupby('DETECTED_LANGUAGE')['AUDIO_DURATION_SECONDS']
+                 .sum().reindex(lang.index) / 3600)
+        st.dataframe(
+            pd.DataFrame({
+                'Language': lang.index,
+                'Files': lang.values,
+                'Share': lang.values / len(df) * 100,
+                'Audio hours': hours.values,
+            }),
+            use_container_width=True, hide_index=True,
+            column_config={
+                'Files': st.column_config.NumberColumn(format="%d"),
+                'Share': st.column_config.NumberColumn(format="%.1f%%"),
+                'Audio hours': st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
 
     # Recent files table
     st.subheader("Recent Transcriptions")

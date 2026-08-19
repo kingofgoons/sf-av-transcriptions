@@ -1,0 +1,49 @@
+name: transcription-dashboard
+
+# Pins the app's Python environment for the WAREHOUSE runtime.
+#
+# WHY THIS FILE IS NOT OPTIONAL: with no environment.yml, Snowflake resolves the
+# OLDEST supported Streamlit, 1.22.0 (2023) - not the newest. The app ran that way until
+# 2026-08-19, which silently degraded several components:
+#
+#   st.file_uploader     needs >= 1.26  (hard-errored: "unsupported in Streamlit 1.22.0")
+#   st.download_button   needs >= 1.26  (SRT/CSV export)
+#   st.dataframe(hide_index=)  needs >= 1.23
+#   st.column_config     needs >= 1.23
+#   st.fragment          needs >= 1.37  (scoped status refresh; guarded by hasattr)
+#   st.scatter_chart     needs >= 1.27
+#   x_label / y_label on built-in charts  needs >= 1.39
+#
+# Confirm what is actually resolved with:
+#   DESCRIBE STREAMLIT TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIPTION_DASHBOARD;
+# and read `default_packages` / `user_packages`. An unpinned `streamlit` in default_packages
+# means this file is not being picked up - it must sit in the ROOT of the app's source
+# directory, i.e. next to transcription_dashboard.py.
+#
+# CONSTRAINTS:
+#   - Only the Snowflake Anaconda Channel is available; no pip/PyPI on warehouse runtime.
+#   - Only the documented subset of Streamlit versions works here. The channel carries more
+#     versions than SiS supports - picking an unlisted one breaks the app.
+#     Supported (2026-08): 1.52.2 1.52.1 1.52.0 1.51.0 1.50.0 1.49.1 1.48.0 1.47.0 1.46.1
+#                          1.45.1 1.45.0 1.44.1 1.44.0 1.42.0 1.39.0 1.35.0 1.31.1 1.29.0
+#                          1.26.0 1.22.0
+#   - Pin with `=`, not `==`. Ranges use `*` wildcards, not comparison operators.
+#   - Do NOT pin `python` here. See the warning below.
+
+# DO NOT ADD `- python=3.11` HERE. It looks right, and the Snowflake docs show it, but on a
+# warehouse-runtime STREAMLIT object the entry is translated into a Python function package
+# spec of `python==3.11`, which is not a resolvable package name, and the app dies at load
+# with:
+#     SQL compilation error: Cannot create a Python function with the specified packages.
+#     'Packages not found: python==3.11'
+# The base environment already reports `python==3.11.*` in default_packages (note the `.*`),
+# so the interpreter version needs no pin here. Set it in Snowsight's package picker if it
+# ever has to change. Broke the app once on 2026-08-19; do not reintroduce.
+
+channels:
+  - snowflake
+
+dependencies:
+  - streamlit=1.52.2
+  - pandas
+  - snowflake-snowpark-python

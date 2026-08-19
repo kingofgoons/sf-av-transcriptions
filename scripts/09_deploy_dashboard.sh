@@ -126,7 +126,7 @@ echo "  app:      ${FQ_APP}"
 echo "  title:    ${APP_TITLE}"
 echo "  owner:    ${APP_ROLE}"
 echo "  wh:       ${APP_WH}"
-echo "  modules:  ${MODULE_COUNT} .py files + .streamlit/config.toml"
+echo "  modules:  ${MODULE_COUNT} .py files + .streamlit/config.toml + environment.yml"
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,23 @@ if [[ -f "${APP_DIR}/.streamlit/config.toml" ]]; then
     " >/dev/null
 else
     echo -e "${YELLOW}  no .streamlit/config.toml - app will use default theme${NC}"
+fi
+
+# environment.yml pins the Python environment. It must sit in the ROOT of the source
+# directory, alongside the entrypoint. WITHOUT IT SNOWFLAKE RESOLVES STREAMLIT 1.22.0 -
+# the OLDEST supported version, not the newest - which breaks st.file_uploader,
+# st.download_button, st.fragment and hide_index. This is a hard failure, not a warning:
+# the app still loads without it, so a silent omission would ship a 2023 Streamlit.
+if [[ -f "${APP_DIR}/environment.yml" ]]; then
+    echo "Uploading environment.yml..."
+    snow sql --connection "${CONNECTION}" --enable-templating NONE -q "
+    PUT 'file://${APP_DIR}/environment.yml' '@${APP_STAGE}/${STAGE_DIR}/'
+        AUTO_COMPRESS = FALSE OVERWRITE = TRUE;
+    " >/dev/null
+else
+    echo -e "${RED}ERROR: ${APP_DIR}/environment.yml is missing.${NC}"
+    echo "Without it the app silently runs Streamlit 1.22.0 and several components break."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -220,6 +237,17 @@ if [[ -f "${APP_DIR}/.streamlit/config.toml" ]]; then
     fi
 fi
 
+if [[ -f "${APP_DIR}/environment.yml" ]]; then
+    REMOTE_ENV="$(find "${TMP}" -name 'environment.yml' -type f | head -1)"
+    if [[ -z "${REMOTE_ENV}" ]]; then
+        echo -e "  ${RED}MISSING on stage: environment.yml${NC}"; MISMATCH=1
+    elif ! diff -q "${REMOTE_ENV}" "${APP_DIR}/environment.yml" >/dev/null; then
+        echo -e "  ${RED}DIFFERS: environment.yml${NC}"; MISMATCH=1
+    else
+        CHECKED=$((CHECKED+1))
+    fi
+fi
+
 [[ ${MISMATCH} -eq 0 ]] || fail "VERIFY FAILED: deployed sources do not match local."
 echo -e "  ${GREEN}${CHECKED} file(s) match local${NC}"
 
@@ -247,6 +275,45 @@ escalation, not a cosmetic problem. Ownership cannot be transferred after the fa
 the app must be recreated while using ${APP_ROLE}."
 fi
 echo -e "  ${GREEN}owner is ${ACTUAL_OWNER}${NC}"
+
+# ---------------------------------------------------------------------------
+# 4. Assert the Streamlit version pin actually took effect.
+#
+#    Staging environment.yml is not enough - Snowflake only picks it up when it sits in
+#    the source root. If it is missed, the app silently resolves Streamlit 1.22.0 from
+#    2023. The app still loads, so this failure mode is invisible without an explicit
+#    check. It cost a debugging session once already; do not downgrade it to a warning.
+#
+#    Read USER_PACKAGES, not DEFAULT_PACKAGES. default_packages always lists a bare,
+#    unpinned `streamlit` because that is the base environment - it says nothing about
+#    what environment.yml asked for, and matching against it is a guaranteed false
+#    positive (which is exactly what the first version of this check did).
+# ---------------------------------------------------------------------------
+PKG_OUT="$(snow sql --connection "${CONNECTION}" --enable-templating NONE --format json -q "
+DESCRIBE STREAMLIT ${FQ_APP};
+")"
+USER_PKGS="$(printf '%s' "${PKG_OUT}" | /usr/bin/python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+rows=[r for blk in (data if isinstance(data,list) else [data]) for r in (blk if isinstance(blk,list) else [blk]) if isinstance(r,dict)]
+for r in rows:
+    if 'user_packages' in r: print(r.get('user_packages') or ''); break
+")"
+
+if [[ -z "${USER_PKGS}" ]]; then
+    fail "VERIFY FAILED: the app has NO user packages, so environment.yml was not applied.
+Snowflake falls back to Streamlit 1.22.0 (the OLDEST supported version), which breaks
+st.file_uploader, st.download_button, st.fragment and hide_index. Confirm environment.yml
+landed in the ROOT of @${APP_STAGE}/${STAGE_DIR}/ - a subdirectory is ignored silently."
+fi
+if ! grep -qE 'streamlit==[0-9]+\.[0-9]+' <<<"${USER_PKGS}"; then
+    fail "VERIFY FAILED: streamlit is not pinned to a specific version.
+  user_packages: ${USER_PKGS}
+Pin it in environment.yml with '=' (conda), e.g. 'streamlit=1.52.2', and use only a version
+that Streamlit-in-Snowflake supports on warehouse runtime."
+fi
+PINNED_VER="$(grep -oE 'streamlit==[0-9.]+' <<<"${USER_PKGS}")"
+echo -e "  ${GREEN}${PINNED_VER} (was unpinned -> 1.22.0)${NC}"
 
 echo ""
 echo -e "${GREEN}Dashboard deployed and verified.${NC}"

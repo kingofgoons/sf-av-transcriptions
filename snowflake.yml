@@ -1,5 +1,9 @@
 # Snowflake CLI project definition.
 #
+# LOCATION: this file belongs at the PROJECT ROOT, not in streamlit/. The `snow` CLI
+# discovers it by walking up from the working directory, its paths are resolved relative to
+# it, and it describes the project rather than any one entity.
+#
 # NOT THE AUTHORITATIVE DEPLOY PATH. Use scripts/09_deploy_dashboard.sh instead.
 #
 # WHY: `snow streamlit deploy` creates the app as the CONNECTION's role. The dashboard is
@@ -14,6 +18,17 @@
 #
 # This file is kept only so `snow streamlit` subcommands (get-url, list) resolve the app,
 # and to document the app's shape in one place.
+#
+# STAGE LAYOUT - the contents of streamlit/ are uploaded FLAT to
+# @STREAMLIT_STAGE/TRANSCRIPTION_DASHBOARD/, so main_file is a bare filename with no
+# streamlit/ prefix. Warehouse runtime requires the entrypoint in the ROOT of the source
+# directory. Verify with:
+#   DESCRIBE STREAMLIT TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIPTION_DASHBOARD;
+#
+# The Python environment is pinned in streamlit/environment.yml, which is uploaded
+# alongside the modules. Without it Snowflake resolves Streamlit 1.22.0 (the OLDEST
+# supported version, not the newest) and st.file_uploader, st.download_button, st.fragment
+# and hide_index all break. Do not remove it.
 
 definition_version: 2
 
@@ -24,10 +39,11 @@ entities:
       database: TRANSCRIPTION_DB_V2
       schema: TRANSCRIPTION_SCHEMA_V2
       name: TRANSCRIPTION_DASHBOARD
-    title: transcription_dashboard_v2
+    title: transcription_dashboard_v3
     query_warehouse: TRANSCRIPTION_WH_V2
-    # Warehouse runtime requires the entrypoint in the ROOT of the source directory.
-    main_file: streamlit/transcription_dashboard.py
+    # Bare filename: the source directory on the stage is flat. See STAGE LAYOUT above.
+    main_file: transcription_dashboard.py
     stage: TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.STREAMLIT_STAGE
+    # Directory contents, not the directory itself - streamlit/ is not a stage prefix.
     artifacts:
-      - streamlit/
+      - streamlit/*

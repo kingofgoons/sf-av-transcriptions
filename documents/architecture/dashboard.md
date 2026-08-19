@@ -20,6 +20,8 @@ Operating procedures are in [../operations/runbook.md](../operations/runbook.md)
 | Source type | `FROM`-based (not legacy `ROOT_LOCATION`) |
 | Source | `@…STREAMLIT_STAGE/TRANSCRIPTION_DASHBOARD/` |
 | Entrypoint | `transcription_dashboard.py` (**must** be at the source root) |
+| Streamlit | **pinned to 1.52.2** via `environment.yml` (see §3a) |
+| Python | 3.11 |
 | Deploy | `scripts/09_deploy_dashboard.sh` — **the only supported path** |
 
 Open via **Projects » Streamlit**. Do not bookmark the direct URL: every deploy does
@@ -38,6 +40,7 @@ multipage navigation, which would silently restructure the app. Tab modules are 
 ```
 streamlit/
 ├── .streamlit/config.toml   theme only
+├── environment.yml          Python + Streamlit version pin - NOT optional, see §3a
 ├── transcription_dashboard.py   entrypoint: page config, sidebar, status block, tabs
 ├── sf_config.py             session, NAMES holder, constants
 ├── sf_theme.py              BRAND palette, CSS, status card, brand_header
@@ -109,6 +112,55 @@ from the live session, so `from sf_config import T_RESULTS` would bind the fallb
 *import* time, before the session exists, and every query would silently target the wrong
 deployment without raising. Consumers read `NAMES.T_RESULTS` at call time. The pre-flight
 linter fails the build on any module-level `NAMES.*` read.
+
+## 3a. The Streamlit version pin
+
+**`environment.yml` is not optional.** With no `environment.yml`, Snowflake resolves the
+**oldest** supported Streamlit — **1.22.0**, from 2023 — not the newest. The app ran that
+way from creation until 2026-08-19.
+
+That silently degraded several components. `st.file_uploader` was the only one that
+hard-errored (`Unsupported component error: st.file_uploader is unsupported in Streamlit
+1.22.0`); the rest simply did not do what the code asked:
+
+| Component | Needs | Used by |
+|---|---|---|
+| `st.dataframe(hide_index=)` | 1.23 | every table |
+| `st.column_config` | 1.23 | overview and analytics tables |
+| `st.download_button` | 1.26 | CSV / SRT export |
+| `st.file_uploader` | 1.26 | in-app media upload |
+| `st.scatter_chart` | 1.27 | processing time vs duration |
+| `st.fragment` | 1.37 | scoped status refresh |
+| `x_label` / `y_label` on built-in charts | 1.39 | axis labels |
+
+The file **must sit in the root of the source directory**, beside the entrypoint. In a
+subdirectory it is ignored silently.
+
+**Do not pin `python` in this file**, even though the Snowflake docs example shows
+`- python=3.11`. On a warehouse-runtime `STREAMLIT` object the entry is translated into a
+Python function package spec of `python==3.11`, which is not a resolvable package name, and
+the app dies at load:
+
+```
+SQL compilation error: Cannot create a Python function with the specified packages.
+'Packages not found: python==3.11'
+```
+
+Note the base environment reports `python==3.11.*` — with the `.*` — so the interpreter is
+already 3.11 and needs no pin. This took the app down on 2026-08-19. `lint_dashboard.py` now
+rejects a `python` entry outright.
+
+Verify with `DESCRIBE STREAMLIT …` and read the two package columns:
+
+- `user_packages` — what `environment.yml` asked for. Should contain `streamlit==1.52.2`.
+- `default_packages` — the base environment. **Always** contains a bare, unpinned
+  `streamlit`, regardless of the pin. Do not assert against this column; matching it is a
+  guaranteed false positive. The deploy script's first version of this check did exactly
+  that and failed a working deploy.
+
+Other constraints: only the Snowflake Anaconda Channel is available (no pip/PyPI on
+warehouse runtime); pin with `=` not `==` in the yml; and only the documented subset of
+Streamlit versions works, which is narrower than what the channel carries.
 
 ## 4. Owner's rights: what the app can and cannot do
 
@@ -242,13 +294,37 @@ brand's `#F0F7FB` tint, which is visually indistinguishable from Streamlit's def
 `#F0F2F6` — correctly applied, imperceptible. Heading colour and the Snowflake Blue rule
 under H2 are what actually make it read as Snowflake, and those are only reachable via CSS.
 
-`config.toml` is restricted to options that have existed in Streamlit for years, because
-warehouse runtime resolves an **unpinned** version and an unrecognised option risks the
-theme being discarded. Newer options (`borderColor`, `chartCategoricalColors`, `baseRadius`,
-`linkColor`) are avoided for that reason.
+`config.toml` was previously restricted to long-standing options because warehouse runtime
+resolved an unpinned Streamlit and an unrecognised option risked the theme being discarded.
+**That constraint is gone** now that `environment.yml` pins 1.52.2 — the newer options
+(`borderColor`, `chartCategoricalColors`, `baseRadius`, `linkColor`) are available and are a
+reasonable next step for the visual pass. They are simply not used yet.
 
 Semantic status colours (green/orange/red) are deliberately **not** branded — a wedged
 container must remain visually distinct from a healthy run.
+
+## 6a. Visualization choices
+
+Reworked 2026-08-19. The governing rule: **`value_counts()` on a continuous column is a
+bug, not a chart.** File size in MB and transcript word count are effectively continuous, so
+nearly every value was unique and every bar had height 1. A distribution over continuous
+data needs binning (`pd.cut`). Two charts were wrong this way.
+
+| Panel | Now | Why |
+|---|---|---|
+| File Types (Overview) | Table | Three categories with a count each. A chart spends axes and gridlines to convey three numbers, and cannot carry the share column |
+| Language Distribution (Overview) | Table | The corpus is ~95% one language, so a bar chart is one tall bar beside a row of slivers. The long tail is the interesting part, and the table adds audio hours to answer "real second language, or three stray files?" |
+| Processing time vs duration | Scatter, both axes labelled, in **minutes** | Recordings run to hours; four-digit second counts are unreadable as axis labels. Caption states the realtime ratio, which is the number that matters for capacity planning |
+| File size distribution | **Cumulative GB over time** | Replaces the height-1 histogram. Corpus growth is the storage-planning question |
+| Processing efficiency by file type | Table | The useful output is four numbers per type (n, mean duration, mean runtime, ratio), which a single-series bar chart cannot show. Ratio is **duration-weighted** (`sum/sum`), so a 30-second clip does not outweigh a two-hour call |
+| Transcript length | **Binned histogram** + median/min/max, and a warning count for transcripts under 100 words | Bins make the shape readable. The short-transcript count is the actionable signal: it usually means silence, a failed audio extract, or non-speech audio rather than a genuinely brief meeting |
+
+**Removed:** *Speaker Count Distribution* and *Files with Speaker Data by Language*.
+`SPEAKER_COUNT` comes from a duration-and-gap heuristic, not real diarization, so charting
+its distribution presented a guess with the authority of a measurement. Revisit once video
+runs can attribute speech per frame (`AI_MULTI_EMBED` over the video alongside the audio
+transcript). Until then there is nothing trustworthy to plot — this is recorded in
+`tab_analytics.py`'s module docstring so it is not "restored" as a regression.
 
 ## 7. Deploy and pre-flight
 
@@ -260,9 +336,21 @@ container must remain visually distinct from a healthy run.
 3. **Clears stale staged files.** `CREATE OR REPLACE … FROM` *copies* the stage directory
    rather than diffing, so a module deleted locally would linger and could shadow a real or
    stdlib name.
-4. Uploads modules and `.streamlit/config.toml`.
+4. Uploads modules, `.streamlit/config.toml`, and `environment.yml`. A missing
+   `environment.yml` is a **hard failure**, not a warning — the app still loads without it,
+   so omitting it would silently ship a 2023 Streamlit.
 5. Recreates the app as the app role.
-6. **Verifies** every file by download-and-diff, and asserts the owner.
+6. **Verifies** every file by download-and-diff, asserts the owner, and asserts that
+   `user_packages` contains a pinned `streamlit==<version>`.
+
+The pre-flight also rejects an `environment.yml` that is missing, that pins `python`, or
+that leaves `streamlit` unpinned — all three are silent-failure modes. Both negative cases
+were tested against the linter rather than assumed.
+
+**What the deploy script cannot catch:** it verifies the files, the owner and the package
+spec, but it does not load the app. A package set that Snowflake accepts at `CREATE` time
+can still fail at *render* time — which is exactly how the `python==3.11` pin got through a
+fully "verified" deploy. **Always open the app after deploying.**
 
 The pre-flight exists because of a real escape: the first modular deploy shipped with
 `sf_exports` missing a `datetime` import and `tab_browse` referencing `session` without
