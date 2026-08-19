@@ -78,7 +78,7 @@ This project provides:
 - Account name and call timestamp are extracted from the filename
 
 ### Gong Integration
-- `scripts/05_sync_gong.sh` pulls Gong call records from a Snowhouse account via cross-account JSON export and idempotent MERGE
+- `scripts/06_sync_gong.sh` pulls Gong call records from a Snowhouse account via cross-account JSON export and idempotent MERGE
 - `GONG_CALLS_MIRROR` stores synced records with call briefs, key points, talk time, and participant data
 - The AV uploader offers a Gong sync prompt after each upload batch
 
@@ -108,19 +108,28 @@ This project provides:
 ### Setup
 
 ```bash
-# 1. Create database objects, warehouse, compute pool, and table
-snow sql -f scripts/01_setup.sql --connection YOUR_CONNECTION
+# 0. ONCE PER ACCOUNT - create the shared config store (deploy DB + stage)
+snow sql -f scripts/01_bootstrap.sql --connection YOUR_CONNECTION
 
-# 2. Deploy the notebook to Snowflake
-./scripts/03_deploy_notebook.sh
+# 1. Edit scripts/00_config.sql for your deployment, bump CONFIG_REVISION, then
+#    publish it. Every later script reads the STAGED copy, so this is required.
+cd scripts/ && ./publish_config.sh && cd ..
 
-# 3. Set up automated pipeline (streams + tasks)
-snow sql -f scripts/02_automate.sql --connection YOUR_CONNECTION
+# 2. Create database objects, warehouse, compute pool, and table
+#    Idempotent: stateful objects (db, schema, stages, results table, pool, notebook)
+#    use IF NOT EXISTS, so re-running preserves transcripts and media.
+snow sql -f scripts/02_setup.sql --connection YOUR_CONNECTION
 
-# 4. Create Gong integration objects (view, search, semantic view, agent)
-snow sql -f scripts/06_gong_objects.sql --connection YOUR_CONNECTION
+# 3. Deploy the notebook to Snowflake
+./scripts/04_deploy_notebook.sh
 
-# 5. Deploy Streamlit dashboard
+# 4. Set up the event-driven pipeline (gate procedure + scheduleless task)
+snow sql -f scripts/03_automate.sql --connection YOUR_CONNECTION
+
+# 5. Create Gong integration objects (view, search, semantic view, agent)
+snow sql -f scripts/05_gong_objects.sql --connection YOUR_CONNECTION
+
+# 6. Deploy Streamlit dashboard
 snow streamlit deploy --replace --connection YOUR_CONNECTION
 
 # If your CLI session token is expired (e.g. DEMO account), use a temporary connection with a PAT:
@@ -147,10 +156,10 @@ Files are automatically detected and transcribed within 5 minutes.
 
 ```bash
 # Manual sync from Snowhouse → DEMO
-./scripts/05_sync_gong.sh
+./scripts/06_sync_gong.sh
 
 # Preview without writing
-./scripts/05_sync_gong.sh --dry-run
+./scripts/06_sync_gong.sh --dry-run
 ```
 
 ## Output Schema
@@ -198,29 +207,52 @@ FORCE_RETRANSCRIBE = False            # Re-process all files
 
 ### Parallel Deployments
 
-Edit `scripts/00_config.sql` to deploy multiple instances (dev/staging/prod) without conflicts:
+`scripts/00_config.sql` is the **single source of truth** for every object name. No other
+script contains a config block; each loads it with one line:
 
 ```sql
+EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
+```
+
+To deploy another instance (dev/staging/prod), edit the values, bump the revision, and
+publish:
+
+```sql
+SET CONFIG_REVISION = '2026-08-18c';
 SET PROJECT_DB = 'TRANSCRIPTION_DEV';
 SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';
 SET PROJECT_WH = 'TRANSCRIPTION_DEV_WH';
 SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_DEV_GPU_POOL';
 ```
 
+```bash
+cd scripts/ && ./publish_config.sh
+```
+
+Scripts read the **staged** copy, so publishing is required for changes to take effect.
+Each script echoes `CONFIG_REVISION` as its first result so a stale staged copy is
+obvious. To run two deployments side by side, stage a second file (e.g.
+`00_config_dev.sql`) and point the include at it.
+
 ## Project Structure
 
 ```
 audio-video-transcription-snowflake/
 ├── scripts/
-│   ├── 00_config.sql                 # Session variables for parallel deployments
-│   ├── 01_setup.sql                  # Database, schema, stage, compute pool, table
-│   ├── 02_automate.sql               # Streams, tasks, stored procedure
-│   ├── 03_deploy_notebook.sh         # Deploy notebook via Snowflake CLI
-│   ├── 04_teardown.sql               # Teardown all project objects
-│   ├── 05_sync_gong.sh               # Cross-account Gong sync orchestrator
-│   ├── 05_sync_gong.sql              # Gong call SELECT (runs on Snowhouse)
-│   └── 06_gong_objects.sql           # Gong mirror table, unified view, search,
-│                                     #   semantic view, and Cortex Agent (runs on DEMO)
+│   ├── 00_config.sql                 # SINGLE SOURCE OF TRUTH for object names
+│   ├── 01_bootstrap.sql              # Deploy DB + config stage (once per account)
+│   ├── 02_setup.sql                  # Database, schema, stage, compute pool, table
+│   ├── 03_automate.sql               # Gate procedure + scheduleless task
+│   ├── 04_deploy_notebook.sh         # Deploy notebook via Snowflake CLI
+│   ├── 05_gong_objects.sql           # Gong mirror table, unified view, search,
+│   │                                 #   semantic view, and Cortex Agent (runs on DEMO)
+│   ├── 06_sync_gong.sh               # Cross-account Gong sync orchestrator
+│   ├── 07_reset.sql                  # Stream reset (stopgap)
+│   ├── 08_telemetry_debug.sql        # Container telemetry diagnostics
+│   ├── 999_teardown.sql               # GUARDED teardown (4 levels, 5 guards)
+│   ├── publish_config.sh             # Utility: PUT 00_config.sql to the stage
+│   ├── sync_gong_query.sql           # Utility: Gong call SELECT (runs on Snowhouse)
+│   └── install_ffmpeg.sh             # Utility: ffmpeg install in container
 ├── notebooks/
 │   └── audio_video_transcription.ipynb  # GPU transcription notebook
 ├── transcription_dashboard.py           # Streamlit in Snowflake dashboard

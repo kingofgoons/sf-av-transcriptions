@@ -7,33 +7,19 @@
 -- =====================================================
 
 --#############################################################################
--- IMPORTANT: Copy and paste the configuration block from 00_config.sql here
--- before running this script. This allows you to cleanup service users for
--- parallel deployments.
+-- CONFIGURATION IS LOADED, NOT PASTED.
+--   All PROJECT_* / FQ_* / SERVICE_* session variables come from
+--   scripts/00_config.sql, staged at @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS.
+--
+--   Prerequisite (once per account):  scripts/01_bootstrap.sql
+--   After editing config:             scripts/publish_config.sh
+--
+--   NOTE: until 2026-08-18 this file carried its own hardcoded config block still
+--   pointing at the V1 names while the active deployment was V2 — meaning cleanup
+--   would have revoked grants on the WRONG deployment's objects.
 --#############################################################################
 
--- Core naming - change these to match your deployment
-SET PROJECT_DB = 'TRANSCRIPTION_DB';              -- Database name
-SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';      -- Schema name
-SET PROJECT_WH = 'TRANSCRIPTION_WH';              -- Warehouse name
-
--- Stage and table names -- DON'T UPDATE (hard-coded in notebook)
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
-
--- Service account naming - update suffix for parallel deployments
-SET SERVICE_ROLE = 'AV_UPLOADER_SERVICE_ROLE';
-SET SERVICE_USER = 'AV_UPLOADER_SERVICE_USER';
-
---#############################################################################
--- END CONFIGURATION
---#############################################################################
-
--- Build fully qualified names
-SET FQ_SCHEMA = $PROJECT_DB || '.' || $PROJECT_SCHEMA;
-SET FQ_STAGE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_AV;
-SET FQ_TABLE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_RESULTS_TABLE;
-SET FQ_VIEW = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.TRANSCRIPTION_SUMMARY';
+EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 
 -- =====================================================
 -- 1. Revoke Role from User (as SECURITYADMIN)
@@ -62,11 +48,11 @@ EXECUTE IMMEDIATE $SQL_CMD;
 USE ROLE SECURITYADMIN;
 
 -- Revoke stage privileges
-SET SQL_CMD = 'REVOKE READ, WRITE ON STAGE ' || $FQ_STAGE || ' FROM ROLE ' || $SERVICE_ROLE;
+SET SQL_CMD = 'REVOKE READ, WRITE ON STAGE ' || $FQ_STAGE_AV || ' FROM ROLE ' || $SERVICE_ROLE;
 EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Revoke table privileges
-SET SQL_CMD = 'REVOKE SELECT ON TABLE ' || $FQ_TABLE || ' FROM ROLE ' || $SERVICE_ROLE;
+SET SQL_CMD = 'REVOKE SELECT ON TABLE ' || $FQ_RESULTS || ' FROM ROLE ' || $SERVICE_ROLE;
 EXECUTE IMMEDIATE $SQL_CMD;
 
 SET SQL_CMD = 'REVOKE SELECT ON VIEW ' || $FQ_VIEW || ' FROM ROLE ' || $SERVICE_ROLE;

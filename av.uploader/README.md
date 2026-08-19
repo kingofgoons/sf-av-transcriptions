@@ -178,7 +178,7 @@ Verifying stage contents...
 Sync Gong calls from Snowhouse → DEMO? [y/N]
 ```
 
-After the upload completes, the script prompts whether to sync Gong calls via `scripts/05_sync_gong.sh`. Enter `y` to run the sync or press Enter to skip.
+After the upload completes, the script prompts whether to sync Gong calls via `scripts/06_sync_gong.sh`. Enter `y` to run the sync or press Enter to skip.
 
 ## 🔒 Security Best Practices
 
@@ -291,7 +291,7 @@ Files with a `NULL` `TRANSCRIPT_WITH_SPEAKERS` column (e.g., diarization was dis
 
 To remove the service user and role from Snowflake, run `cleanup_av_service_user.sql` in Snowsight or your SQL client. This drops `AV_UPLOADER_SERVICE_USER` and `AV_UPLOADER_SERVICE_ROLE` and revokes all their grants.
 
-The cleanup script does **not** remove the transcription database, schema, warehouse, or stage — those are managed by the main project teardown scripts (`scripts/04_teardown.sql`).
+The cleanup script does **not** remove the transcription database, schema, warehouse, or stage — those are managed by the main project teardown scripts (`scripts/999_teardown.sql`).
 
 ## 🔗 Related Documentation
 

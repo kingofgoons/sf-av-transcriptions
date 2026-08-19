@@ -1,32 +1,58 @@
 --#############################################################################
--- IMPORTANT: Copy and paste the configuration block from 00_config.sql here
--- before running this script. This allows you to deploy parallel instances.
+-- 02_setup.sql — create all Snowflake objects for a deployment
+--#############################################################################
+--
+-- CONFIGURATION IS LOADED, NOT PASTED.
+--   All PROJECT_* / FQ_* session variables come from scripts/00_config.sql, staged
+--   at @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS. EXECUTE IMMEDIATE FROM runs that file
+--   in THIS session, so its variables persist for the rest of this script.
+--
+--   Prerequisite (once per account):  scripts/01_bootstrap.sql
+--   After editing config:             scripts/publish_config.sh
+--
+--   Check the CONFIG_REVISION echoed by the include below. If it is not the
+--   revision you just edited, the staged copy is stale — re-run publish_config.sh.
+--
+--#############################################################################
+-- IDEMPOTENT: SAFE TO RE-RUN ON A LIVE DEPLOYMENT (as of 2026-08-18)
+--#############################################################################
+--
+-- This script used to be destructive. It used CREATE OR REPLACE on the database,
+-- schema, media stage and results table, so a second run silently discarded every
+-- transcript (441 rows / 250 hours) and every staged media file (325). That is fixed.
+--
+-- THE RULE APPLIED HERE: STATEFUL objects use IF NOT EXISTS. STATELESS definitions
+-- keep CREATE OR REPLACE, because you WANT a re-run to pick up edits to them.
+--
+--   IF NOT EXISTS (holds data / history - never replace):
+--     DATABASE                  the whole deployment
+--     SCHEMA                    every object in it
+--     AUDIO_VIDEO_STAGE         uploaded media
+--     NOTEBOOK_STAGE            backs the notebook's VERSION$n history
+--     TRANSCRIPTION_RESULTS     the transcripts
+--     COMPUTE POOL              dropping it kills in-flight transcription
+--     NOTEBOOK                  owns VERSION$n + live version
+--
+--   CREATE OR REPLACE (pure definition - refresh on every run):
+--     NETWORK RULEs             egress allow-lists
+--     EXTERNAL ACCESS INTEGRATIONs
+--     FILE FORMAT CSVFORMAT
+--     VIEW TRANSCRIPTION_SUMMARY
+--     WAREHOUSE                 (already IF NOT EXISTS)
+--
+-- CONSEQUENCE TO KNOW ABOUT:
+--   Because TRANSCRIPTION_RESULTS is now IF NOT EXISTS, adding a column to the DDL
+--   below does NOT change an existing table. Evolve a live deployment with explicit
+--   ALTER TABLE statements (see migration/), not by re-running this script.
+--
+--   Likewise, changing MIN/MAX_NODES or INSTANCE_FAMILY here does not resize an
+--   existing compute pool - use ALTER COMPUTE POOL.
+--
+-- Object names come from 00_config.sql, so pointing PROJECT_DB at a new name and
+-- re-running is how you create a parallel deployment.
 --#############################################################################
 
--- Core naming - change these to create a parallel deployment
-SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name
-SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA_V2';      -- Schema name
-SET PROJECT_WH = 'TRANSCRIPTION_WH_V2';              -- Warehouse name
-SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_GPU_POOL_V2';  -- GPU compute pool name
-
--- Derived names (automatically built from above)
-SET PROJECT_NOTEBOOK = 'TRANSCRIBE_AV_FILES_V2';     -- Notebook name
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files -- DON'T UPDATE (hard-coded in notebook)
-SET PROJECT_STAGE_NB = 'NOTEBOOK_STAGE';          -- Stage for notebook assets -- DON'T UPDATE (hard-coded in notebook)
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table -- DON'T UPDATE (hard-coded in notebook)
-SET PROJECT_STREAM = 'AV_STAGE_STREAM_V2';           -- Stream for file detection
-SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK_V2';  -- Transcription task
-SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh task
-
--- Integration names (these are account-level, so include prefix to avoid conflicts)
-SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration_V2';
-SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration_V2';
-SET PROJECT_ALLOW_ALL_RULE = 'allow_all_rule_V2';
-SET PROJECT_PYPI_RULE = 'pypi_network_rule_V2';
-
---#############################################################################
--- END CONFIGURATION
---#############################################################################
+EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 
 USE ROLE SYSADMIN;
 
@@ -36,7 +62,9 @@ CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER($PROJECT_WH)
   AUTO_SUSPEND = 60
   AUTO_RESUME = TRUE
   STATEMENT_TIMEOUT_IN_SECONDS = 14400;  -- 4 hours: EXECUTE NOTEBOOK blocks until completion
-CREATE OR REPLACE DATABASE IDENTIFIER($PROJECT_DB);
+
+-- STATEFUL: holds the schema, stages and transcripts. IF NOT EXISTS, never REPLACE.
+CREATE DATABASE IF NOT EXISTS IDENTIFIER($PROJECT_DB);
 
 -- Increase data retention to 14 days to prevent streams from going stale.
 -- Default is 1 day, which is too short — if the stream isn't consumed within
@@ -45,7 +73,8 @@ CREATE OR REPLACE DATABASE IDENTIFIER($PROJECT_DB);
 -- manual recreate + backfill. 14 days provides a comfortable buffer.
 ALTER DATABASE IDENTIFIER($PROJECT_DB) SET DATA_RETENTION_TIME_IN_DAYS = 14;
 
-CREATE OR REPLACE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+-- STATEFUL: contains the results table and stages. IF NOT EXISTS, never REPLACE.
+CREATE SCHEMA IF NOT EXISTS IDENTIFIER($PROJECT_SCHEMA);
 
 USE WAREHOUSE IDENTIFIER($PROJECT_WH);
 USE DATABASE IDENTIFIER($PROJECT_DB);
@@ -58,10 +87,12 @@ USE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
 ----------------------------------
 USE ROLE ACCOUNTADMIN;
 
--- Create GPU compute pool for Whisper transcription
-DROP COMPUTE POOL IF EXISTS IDENTIFIER($PROJECT_COMPUTE_POOL);
-
-CREATE COMPUTE POOL IDENTIFIER($PROJECT_COMPUTE_POOL)
+-- Create GPU compute pool for Whisper transcription.
+-- IF NOT EXISTS rather than DROP + CREATE: dropping the pool kills any in-flight
+-- transcription, and agents.md forbids dropping it without first confirming none is
+-- running. To change MIN/MAX_NODES or INSTANCE_FAMILY on an existing pool, use
+-- ALTER COMPUTE POOL instead of re-running this script.
+CREATE COMPUTE POOL IF NOT EXISTS IDENTIFIER($PROJECT_COMPUTE_POOL)
         MIN_NODES = 1
         MAX_NODES = 3
         INSTANCE_FAMILY = GPU_NV_S; -- May need to change this based on region
@@ -73,8 +104,8 @@ CREATE OR REPLACE NETWORK RULE IDENTIFIER($PROJECT_ALLOW_ALL_RULE)
           MODE = EGRESS
           VALUE_LIST = ('0.0.0.0:443','0.0.0.0:80');
 
--- Use dynamic SQL for integrations (IDENTIFIER() not supported in ALLOWED_NETWORK_RULES)
-SET FQ_ALLOW_ALL_RULE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_ALLOW_ALL_RULE;
+-- Use dynamic SQL for integrations (IDENTIFIER() not supported in ALLOWED_NETWORK_RULES).
+-- FQ_ALLOW_ALL_RULE comes from 00_config.sql.
 SET SQL_CMD = 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || $PROJECT_ALLOW_ALL_INTEGRATION || 
               ' ALLOWED_NETWORK_RULES = (' || $FQ_ALLOW_ALL_RULE || ') ENABLED = TRUE';
 EXECUTE IMMEDIATE $SQL_CMD;
@@ -84,7 +115,7 @@ CREATE OR REPLACE NETWORK RULE IDENTIFIER($PROJECT_PYPI_RULE)
           MODE = EGRESS
           VALUE_LIST = ('pypi.org', 'pypi.python.org', 'pythonhosted.org', 'files.pythonhosted.org');
 
-SET FQ_PYPI_RULE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_PYPI_RULE;
+-- FQ_PYPI_RULE comes from 00_config.sql.
 SET SQL_CMD = 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || $PROJECT_PYPI_INTEGRATION || 
               ' ALLOWED_NETWORK_RULES = (' || $FQ_PYPI_RULE || ') ENABLED = TRUE';
 EXECUTE IMMEDIATE $SQL_CMD;
@@ -108,14 +139,23 @@ CREATE OR REPLACE FILE FORMAT CSVFORMAT
     TYPE = 'CSV'
     FIELD_OPTIONALLY_ENCLOSED_BY = '"';
 
--- Create stages
-CREATE OR REPLACE STAGE IDENTIFIER($PROJECT_STAGE_NB) DIRECTORY=(ENABLE=true); -- to store notebook assets
-CREATE OR REPLACE STAGE IDENTIFIER($PROJECT_STAGE_AV) 
-    DIRECTORY = (ENABLE = TRUE) 
+-- Create stages.
+-- Both are STATEFUL and use IF NOT EXISTS:
+--   NOTEBOOK_STAGE   holds the deployed .ipynb and backs the notebook's versions;
+--                    replacing it breaks VERSION$n history (and any rollback point).
+--   AUDIO_VIDEO_STAGE holds the uploaded media (325 files as of 2026-08-18).
+CREATE STAGE IF NOT EXISTS IDENTIFIER($PROJECT_STAGE_NB) DIRECTORY=(ENABLE=true); -- to store notebook assets
+CREATE STAGE IF NOT EXISTS IDENTIFIER($PROJECT_STAGE_AV)
+    DIRECTORY = (ENABLE = TRUE)
     ENCRYPTION=(TYPE='SNOWFLAKE_SSE'); -- to store audio/video files for transcription
 
--- Create table to store transcription results
-CREATE OR REPLACE TABLE IDENTIFIER($PROJECT_RESULTS_TABLE) (
+-- Create table to store transcription results.
+-- STATEFUL: 441 transcripts / 250 hours of audio as of 2026-08-18. IF NOT EXISTS.
+--
+-- CAVEAT: because this no longer replaces the table, adding a column here does NOT
+-- alter an existing deployment. Schema changes to a live table go in migration/ as
+-- explicit ALTER TABLE statements.
+CREATE TABLE IF NOT EXISTS IDENTIFIER($PROJECT_RESULTS_TABLE) (
     FILE_PATH VARCHAR(500),
     FILE_NAME VARCHAR(255),
     FILE_TYPE VARCHAR(10),
@@ -143,7 +183,13 @@ CREATE OR REPLACE TABLE IDENTIFIER($PROJECT_RESULTS_TABLE) (
     PARTICIPANTS_JSON VARIANT          -- Participant metadata (name/email/title/affiliation)
 );
 
--- Create a view for easy querying (using dynamic SQL to resolve table name)
+-- Create a view for easy querying (using dynamic SQL to resolve table name).
+-- STATELESS: keeps CREATE OR REPLACE on purpose - it holds no data, and a re-run
+-- SHOULD pick up edits to the view definition.
+--
+-- Wrapped in EXECUTE IMMEDIATE $$ ... $$ so `snow sql -f` does not split the block on
+-- semicolons (it otherwise fails with "syntax error ... unexpected '<EOF>'").
+EXECUTE IMMEDIATE $$
 DECLARE
     view_sql VARCHAR;
 BEGIN
@@ -162,29 +208,52 @@ FROM ' || $PROJECT_RESULTS_TABLE || '
 GROUP BY FILE_TYPE, DETECTED_LANGUAGE
 ORDER BY FILE_COUNT DESC';
     EXECUTE IMMEDIATE view_sql;
+    RETURN 'TRANSCRIPTION_SUMMARY view created';
 END;
+$$;
 
--- Create notebook (uncomment after uploading notebook files)
--- Note: Using anonymous block because session variables have 256-byte limit
+-- Create notebook.
+-- STATEFUL: the notebook object owns its VERSION$n history plus the live version.
+-- CREATE OR REPLACE would wipe that history, including any version being kept as a
+-- rollback point (e.g. VERSION$4, the pre-Fix-#2 notebook). So: IF NOT EXISTS.
+-- Notebook CONTENT is managed by 04_deploy_notebook.sh, not by this script.
+--
+-- Wrapped in EXECUTE IMMEDIATE $$ ... $$ so `snow sql -f` does not split the block on
+-- semicolons (it otherwise fails with "syntax error ... unexpected '<EOF>'").
+EXECUTE IMMEDIATE $$
 DECLARE
     sql_cmd VARCHAR;
+    note    VARCHAR DEFAULT '';
 BEGIN
-    sql_cmd := 'CREATE OR REPLACE NOTEBOOK ' || $PROJECT_NOTEBOOK || 
+    sql_cmd := 'CREATE NOTEBOOK IF NOT EXISTS ' || $PROJECT_NOTEBOOK ||
                ' FROM ''@' || $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_NB || '''' ||
                ' MAIN_FILE = ''audio_video_transcription.ipynb''' ||
                ' QUERY_WAREHOUSE = ''' || $PROJECT_WH || '''' ||
                ' COMPUTE_POOL=''' || $PROJECT_COMPUTE_POOL || '''' ||
                ' RUNTIME_NAME=''SYSTEM$GPU_RUNTIME''';
     EXECUTE IMMEDIATE sql_cmd;
-    
-    sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' ADD LIVE VERSION FROM LAST';
-    EXECUTE IMMEDIATE sql_cmd;
-    
-    sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' SET EXTERNAL_ACCESS_INTEGRATIONS = ("' || 
-               UPPER($PROJECT_PYPI_INTEGRATION) || '", "' || 
+
+    -- Only meaningful on a brand-new notebook. On an existing one this fails with
+    -- 099106 "There is already a live version. Please commit it first." That is
+    -- expected on a re-run, so tolerate it and leave version management to
+    -- 04_deploy_notebook.sh.
+    BEGIN
+        sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' ADD LIVE VERSION FROM LAST';
+        EXECUTE IMMEDIATE sql_cmd;
+        note := 'live version created';
+    EXCEPTION
+        WHEN OTHER THEN
+            note := 'live version already present - left as is (use 04_deploy_notebook.sh)';
+    END;
+
+    sql_cmd := 'ALTER NOTEBOOK ' || $PROJECT_NOTEBOOK || ' SET EXTERNAL_ACCESS_INTEGRATIONS = ("' ||
+               UPPER($PROJECT_PYPI_INTEGRATION) || '", "' ||
                UPPER($PROJECT_ALLOW_ALL_INTEGRATION) || '")';
     EXECUTE IMMEDIATE sql_cmd;
+
+    RETURN 'Notebook ready: ' || note;
 END;
+$$;
 
 -- Sample queries to test after transcription:
 /*

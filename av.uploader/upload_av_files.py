@@ -190,6 +190,43 @@ def upload_file(conn, local_file, stage_name):
         return False
 
 
+def resolve_task_name(config):
+    """Fully qualified name of the transcription task to trigger."""
+    explicit = config.get('transcription_task')
+    if explicit:
+        return explicit
+    return (
+        f"{config['database']}.{config['schema']}.TRANSCRIBE_NEW_FILES_TASK_V2"
+    )
+
+
+def trigger_transcription(conn, task_name):
+    """Kick off the transcription pipeline immediately after upload.
+
+    The task has no SCHEDULE - it runs only when triggered here (or manually).
+    This replaced a 5-minute polling task that launched a GPU container on every
+    tick whether or not there was work to do.
+
+    EXECUTE TASK is ASYNCHRONOUS: it returns as soon as the run is queued, so this
+    does not block on the transcription itself. That matters because the task body
+    calls EXECUTE NOTEBOOK, which IS synchronous and can run for many minutes.
+
+    The task's gate procedure decides whether a GPU notebook actually launches, so
+    triggering when nothing is new is cheap and safe.
+
+    Privileges: the caller needs OPERATE on the task. The task itself runs with its
+    OWNER's privileges (SYSADMIN), not the uploader service role's.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"EXECUTE TASK {task_name}")
+        result = cursor.fetchone()
+        cursor.close()
+        return True, (str(result[0]) if result else 'Task triggered')
+    except Exception as e:
+        return False, str(e)
+
+
 def upload_av_files(config, av_dir='../AUDIO_VIDEO_STAGE_FILES'):
     """Main function to upload audio/video files to Snowflake stage."""
     print("=" * 80)
@@ -272,7 +309,7 @@ def upload_av_files(config, av_dir='../AUDIO_VIDEO_STAGE_FILES'):
         print(f"  ━ Total:    {len(files_to_upload)}")
         print(f"{'=' * 80}")
         
-        # Verify upload
+        # Verify upload and trigger the pipeline
         if uploaded_count > 0:
             print("\nVerifying stage contents...")
             cursor = conn.cursor()
@@ -280,7 +317,21 @@ def upload_av_files(config, av_dir='../AUDIO_VIDEO_STAGE_FILES'):
             total_in_stage = len(cursor.fetchall())
             cursor.close()
             print(f"✓ Total files in stage @{stage_name}: {total_in_stage}")
-            print(f"\nℹ️  The automated transcription pipeline will process these files within 5 minutes.")
+
+            task_name = resolve_task_name(config)
+            print(f"\nTriggering transcription pipeline...")
+            print(f"  Task: {task_name}")
+            ok, message = trigger_transcription(conn, task_name)
+            if ok:
+                print(f"✓ {message}")
+                print("  Transcription runs in the background on the GPU pool.")
+                print("  Progress: query TRANSCRIPTION_RESULTS, or see scripts/08_telemetry_debug.sql")
+            else:
+                print(f"✗ Could not trigger the pipeline: {message}")
+                print("  Files are uploaded but nothing will transcribe them automatically.")
+                print(f"  Trigger manually:  EXECUTE TASK {task_name};")
+                print("  If this is a privilege error, the uploader role needs:")
+                print(f"    GRANT OPERATE ON TASK {task_name} TO ROLE <uploader_role>;")
         
     finally:
         conn.close()
@@ -331,7 +382,7 @@ def main():
     print()
     answer = input("Sync Gong calls from Snowhouse → DEMO? [y/N] ").strip().lower()
     if answer == 'y':
-        sync_script = Path(__file__).parent.parent / 'scripts' / '05_sync_gong.sh'
+        sync_script = Path(__file__).parent.parent / 'scripts' / '06_sync_gong.sh'
         subprocess.run(['bash', str(sync_script)], cwd=sync_script.parent)
 
 

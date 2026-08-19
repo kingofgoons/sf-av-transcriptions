@@ -1,8 +1,8 @@
--- 06_gong_objects.sql
+-- 05_gong_objects.sql
 --
 -- ACCOUNT:  DEMO  (connection: DEMO)
 -- PURPOSE:  Create the Gong-integration layer on top of the transcription pipeline:
---             1. GONG_CALLS_MIRROR      — landing table for Gong calls synced by 05_sync_gong.sh
+--             1. GONG_CALLS_MIRROR      — landing table for Gong calls synced by 06_sync_gong.sh
 --             2. UNIFIED_MEETINGS_V     — UNION ALL view over local recordings + Gong calls
 --             3. MEETING_SEARCH        — Cortex Search Service for full-text + semantic search
 --             4. MEETINGS_SEMANTIC_VIEW — Semantic View for Cortex Analyst text-to-SQL
@@ -10,20 +10,20 @@
 --
 -- NOTE: This script does NOT use session variables from 00_config.sql.
 --       Object names are hardcoded to TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2,
---       consistent with how 05_sync_gong.sh references them.
+--       consistent with how 06_sync_gong.sh references them.
 --
--- DEPENDENCIES:  Run 01_setup.sql first (creates TRANSCRIPTION_RESULTS and TRANSCRIPTION_WH_V2).
+-- DEPENDENCIES:  Run 02_setup.sql first (creates TRANSCRIPTION_RESULTS and TRANSCRIPTION_WH_V2).
 -- SAFE TO RE-RUN: Yes. GONG_CALLS_MIRROR uses IF NOT EXISTS to preserve synced data.
 --                 All other objects use CREATE OR REPLACE (derived/stateless).
 --
 -- Usage:
---   snow sql -f scripts/06_gong_objects.sql --connection DEMO
+--   snow sql -f scripts/05_gong_objects.sql --connection DEMO
 -- ---------------------------------------------------------------------------
 
 
 -- ============================================================================
 -- 1. GONG_CALLS_MIRROR
---    Landing table for Gong call records synced from Snowhouse by 05_sync_gong.sh.
+--    Landing table for Gong call records synced from Snowhouse by 06_sync_gong.sh.
 --    Uses IF NOT EXISTS — re-running this script will NOT wipe existing sync data.
 -- ============================================================================
 

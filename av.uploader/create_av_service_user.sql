@@ -4,33 +4,21 @@
 -- Run this script as ACCOUNTADMIN or with appropriate privileges
 
 --#############################################################################
--- IMPORTANT: Copy and paste the configuration block from 00_config.sql here
--- before running this script. This allows you to set up service users for
--- parallel deployments.
+-- CONFIGURATION IS LOADED, NOT PASTED.
+--   All PROJECT_* / FQ_* / SERVICE_* session variables come from
+--   scripts/00_config.sql, staged at @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS.
+--
+--   Prerequisite (once per account):  scripts/01_bootstrap.sql
+--   After editing config:             scripts/publish_config.sh
+--
+--   NOTE: until 2026-08-18 this file carried its own hardcoded copy of the config
+--   block that still pointed at the V1 names (TRANSCRIPTION_DB /
+--   TRANSCRIPTION_SCHEMA / TRANSCRIPTION_WH) while the active deployment was V2.
+--   That is why AV_UPLOADER_SERVICE_ROLE ended up holding grants on BOTH V1 and V2
+--   objects. Loading config from one place removes that failure mode.
 --#############################################################################
 
--- Core naming - change these to match your deployment
-SET PROJECT_DB = 'TRANSCRIPTION_DB';              -- Database name
-SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';      -- Schema name
-SET PROJECT_WH = 'TRANSCRIPTION_WH';              -- Warehouse name
-
--- Stage and table names -- DON'T UPDATE (hard-coded in notebook)
-SET PROJECT_STAGE_AV = 'AUDIO_VIDEO_STAGE';       -- Stage for media files
-SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table
-
--- Service account naming - update suffix for parallel deployments
-SET SERVICE_ROLE = 'AV_UPLOADER_SERVICE_ROLE';
-SET SERVICE_USER = 'AV_UPLOADER_SERVICE_USER';
-
---#############################################################################
--- END CONFIGURATION
---#############################################################################
-
--- Build fully qualified names
-SET FQ_SCHEMA = $PROJECT_DB || '.' || $PROJECT_SCHEMA;
-SET FQ_STAGE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_STAGE_AV;
-SET FQ_TABLE = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.' || $PROJECT_RESULTS_TABLE;
-SET FQ_VIEW = $PROJECT_DB || '.' || $PROJECT_SCHEMA || '.TRANSCRIPTION_SUMMARY';
+EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 
 -- Step 1: Use SECURITYADMIN to create role
 USE ROLE SECURITYADMIN;
@@ -71,7 +59,7 @@ SET SQL_CMD = 'GRANT USAGE ON SCHEMA ' || $FQ_SCHEMA || ' TO ROLE ' || $SERVICE_
 EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Grant privileges needed for stage operations (READ and WRITE to upload files)
-SET SQL_CMD = 'GRANT READ, WRITE ON STAGE ' || $FQ_STAGE || ' TO ROLE ' || $SERVICE_ROLE;
+SET SQL_CMD = 'GRANT READ, WRITE ON STAGE ' || $FQ_STAGE_AV || ' TO ROLE ' || $SERVICE_ROLE;
 EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Grant warehouse privileges for PUT operations
@@ -79,10 +67,25 @@ SET SQL_CMD = 'GRANT USAGE ON WAREHOUSE ' || $PROJECT_WH || ' TO ROLE ' || $SERV
 EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Optional: Grant privileges to query transcription results (read-only)
-SET SQL_CMD = 'GRANT SELECT ON TABLE ' || $FQ_TABLE || ' TO ROLE ' || $SERVICE_ROLE;
+SET SQL_CMD = 'GRANT SELECT ON TABLE ' || $FQ_RESULTS || ' TO ROLE ' || $SERVICE_ROLE;
 EXECUTE IMMEDIATE $SQL_CMD;
 
 SET SQL_CMD = 'GRANT SELECT ON VIEW ' || $FQ_VIEW || ' TO ROLE ' || $SERVICE_ROLE;
+EXECUTE IMMEDIATE $SQL_CMD;
+
+-- Allow the uploader to trigger the transcription pipeline after uploading.
+--
+-- The transcription task has NO SCHEDULE - it runs only when triggered. The
+-- uploader fires EXECUTE TASK at the end of a successful upload, which replaced a
+-- 5-minute polling task that launched a GPU container on every tick regardless of
+-- whether there was work to do.
+--
+-- OPERATE is the minimum privilege needed to run a task you do not own. The task
+-- still executes with its OWNER's privileges (SYSADMIN), so this grant does NOT
+-- give the uploader role the notebook's privileges.
+--
+-- Without this grant, uploads succeed but nothing transcribes them automatically.
+SET SQL_CMD = 'GRANT OPERATE ON TASK ' || $FQ_TASK || ' TO ROLE ' || $SERVICE_ROLE;
 EXECUTE IMMEDIATE $SQL_CMD;
 
 -- Step 4: Use USERADMIN to configure RSA public key authentication
