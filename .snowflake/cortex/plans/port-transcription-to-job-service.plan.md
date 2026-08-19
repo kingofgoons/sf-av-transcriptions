@@ -28,6 +28,48 @@ MAIN THREAD:
 
 `snowbook`'s script runner parks forever in `on_scriptrunner_ready` waiting on a condition variable while the main thread sits in `asyncio run_forever` serving gRPC. **No notebook code is on any stack** — every cell has completed. This is inside Snowflake's runtime and cannot be fixed from the notebook. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
 
+### Re-confirmed against a live hang, 2026-08-19 15:52 — and what it means for this port
+
+A second hang was caught **while wedged** and sampled for 20 minutes: **11 dump cycles at exactly
+120s intervals, identically sized stacks throughout** (10 threads, 63 frames), and **zero notebook
+frames** in any post-completion dump. Across 35 minutes of telemetry exactly one frame belonged to
+project code — cell 35 calling `dump_traceback()` itself.
+
+That capture sharpens three things for this plan:
+
+**1. The four parked threads are ALL notebook-runtime machinery, which is why this port should
+work.** Previously this was reasoned; now it is enumerated. The threads that never wind down:
+
+| Frame | Thread's job | Exists in a headless script? |
+|---|---|---|
+| `notebook_script_requests.py:232 on_scriptrunner_ready` | waiting for the *next* cell-execution request | No |
+| `snowflake_run_adaptor.py:264 run_till_end` → `asyncio run_forever` | serving gRPC for the notebook UI | No |
+| `web/stage_copier.py:803 stage_file_watcher` | syncing notebook files to/from stage | No |
+| `status_updater/status_thread.py:145 status_fun` | reporting notebook status | No |
+
+Every one is tied to hosting an interactive notebook. `python transcribe_job.py` starts none of
+them. This is the strongest evidence yet that the port removes the failure mode rather than
+relocating it.
+
+**2. HARD REQUIREMENT: never invoke `snowbook.web.cli`.** The live stack begins
+`runpy.py:196 _run_module_as_main` → `web/cli.py:379 <module>` → `web/cli.py:211 main`, meaning
+snowbook is started as `python -m snowbook.web.cli`. **This port reuses the same snowbooks image**,
+so that module is present in the container and is one command line away from reintroducing the
+exact hang. The service spec `command` must be `python transcribe_job.py` and must never be
+`python -m snowbook...`. Reusing the image is safe; invoking its entrypoint is not. Assert this
+in review of the service spec.
+
+**3. The script runner does NOT exit after the last cell** — it stays alive and *moves* from
+executing the notebook into `on_scriptrunner_ready`. That frame is absent from the baseline dump
+and present in every dump afterwards, which marks the moment the hang begins. Do not model this as
+"cleanup failed to run"; nothing is trying to clean up.
+
+**Scope note: this is a cost and observability fix, not a correctness fix.** Both hangs on
+2026-08-19 committed all 3 rows, with summaries and SRTs intact, before wedging. Across every hang
+observed, no transcript has ever been lost. The port's value is reclaiming ~30 min of idle GPU per
+hung multi-file run and getting a truthful task status — not repairing corrupted data. Weigh it
+accordingly, and do not let the port introduce a data risk that the hang never posed.
+
 **The hang is multi-file-only:** 0 of 8 single-file runs hung; **6 of 8** multi-file runs did
 (updated 2026-08-19). Any reproduction must use 3+ files.
 
@@ -215,7 +257,7 @@ UNITS_TOTAL` and `PCT_COMPLETE = 100.0`, with all four per-file steps present fo
 
 - Add to scripts/00\_config.sql (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with scripts/publish\_config.sh. **Also extend the `V_PROJECT_CONFIG` emitter at the bottom of that file** with the new names — it did not exist when this plan was written and is now how the dashboard resolves object names without drift.
 - Reuse `NOTEBOOK_STAGE` for the payload or add a dedicated payload stage; either way pin the name in config, not inline.
-- Author the service specification: one container on the snowbooks GPU image, `command` running `pip install -r requirements.txt && python transcribe_job.py`, a `stage` volume for the payload and one for `AUDIO_VIDEO_STAGE`, `resources` requesting `nvidia.com/gpu`, and env vars carrying the database/schema/table names.
+- Author the service specification: one container on the snowbooks GPU image, `command` running `pip install -r requirements.txt && python transcribe_job.py`, a `stage` volume for the payload and one for `AUDIO_VIDEO_STAGE`, `resources` requesting `nvidia.com/gpu`, and env vars carrying the database/schema/table names. **The `command` must invoke the script directly — never `python -m snowbook.web.cli`**, which is the module at the top of the hang stack and is present in this image (see Context).
 - Modify scripts/03\_automate.sql per task 2. While in that file, wrap its bare `DECLARE...END;` blocks in `EXECUTE IMMEDIATE $$ ... $$` so it survives `snow sql -f` (existing known issue).
 - Add a deploy script for the payload mirroring the verify-after-deploy discipline now in scripts/04\_deploy\_notebook.sh: upload, then confirm the staged bytes match local. Do not repeat the mistake of trusting an upload as proof of deployment.
 
@@ -257,7 +299,10 @@ Retire the headless notebook path while keeping the notebook for interactive use
 **End-to-end (task 6):**
 
 - Task `SUCCEEDED` with a real `RETURN_VALUE`, not `FAILED`
-- Task duration approximately equals actual work time (expect roughly 2-4 minutes for an 8-minute recording), with **no multi-hour tail**
+- Task duration approximately equals actual work time (expect roughly 2-4 minutes for an 8-minute recording)
+- **The gap between the last progress event and the task end is under ~15 seconds.** This replaces the old "no multi-hour tail" criterion, which became **unfalsifiable** once `USER_TASK_TIMEOUT_MS = 1800000` was introduced — a hang can no longer exceed 30 minutes, so "no multi-hour tail" is now satisfied by hung runs too and would give false confidence. Baselines measured with the query below (2026-08-19): clean runs closed in **4s and 5s**; the hung 3-file run sat **1,339s**. The separation is three orders of magnitude, so ~15s is a generous threshold rather than a tight one
+
+  Note this is the gap from the last *progress event*, not the last *transcript write* — those differ by several seconds because the terminal `CELLS_COMPLETE` event fires after the INSERT. Measuring from the write gives ~11s on a clean run. Use one definition consistently; the query below uses the last event
 - Container exits on its own; no `092848 UNAVAILABLE` and no forced exit involved
 - `TRANSCRIPTION_RESULTS` count increments by exactly 1
 - Second trigger returns `SKIPPED` in seconds and launches no GPU
@@ -265,7 +310,36 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 **Regression guard:** confirm `TRANSCRIPTION_RESULTS` never drops below its pre-change count at any point. Take a zero-copy clone as a backup before the first write to the real table, matching the `TR_BACKUP_GOOD` pattern already in use.
 
-**Honest success criterion:** the hang is multi-file-specific — **6 of 8** multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only after several consecutive multi-file runs with no multi-hour tail. Given the observed hang/clean/hang sequence within six hours on 2026-08-19, "several" means **at least 4 consecutive clean multi-file runs**, not one or two. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then.
+**Honest success criterion:** the hang is multi-file-specific — **6 of 8** multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only when **each** run closes its last-event-to-task-end gap in under ~15s (not merely "under 30 minutes", which the task timeout guarantees regardless). Given the observed hang/clean/hang sequence within six hours on 2026-08-19, "several" means **at least 4 consecutive clean multi-file runs**, not one or two. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then — it is also the backstop if the job service turns out to have an exit problem of its own.
+
+**Measurement query** — use this rather than eyeballing durations, before and after the port. Verified working 2026-08-19:
+
+```sql
+-- Gap between the last progress event and the task ending.
+-- Verified baseline 2026-08-19: clean runs 4s and 5s; hung 3-file run 1,339s.
+-- Target after the port: consistently under ~15s on 3+ file runs.
+WITH last_ev AS (
+    SELECT RUN_ID, MAX(EVENT_TS) AS LAST_EVENT, MAX(RUN_SOURCE) AS SRC,
+           MAX(FILE_TOTAL) AS FILES
+    FROM TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIPTION_RUN_EVENTS
+    GROUP BY RUN_ID
+)
+SELECT LEFT(e.RUN_ID, 8) AS RUN, e.SRC, e.FILES, t.STATE, t.ERROR_CODE,
+       DATEDIFF('second', e.LAST_EVENT, t.COMPLETED_TIME) AS TAIL_SECS,
+       CASE WHEN DATEDIFF('second', e.LAST_EVENT, t.COMPLETED_TIME) <= 15
+            THEN 'clean' ELSE 'HUNG' END AS VERDICT
+FROM last_ev e
+JOIN TABLE(TRANSCRIPTION_DB_V2.INFORMATION_SCHEMA.TASK_HISTORY(
+         TASK_NAME => 'TRANSCRIBE_NEW_FILES_TASK_V2',
+         SCHEDULED_TIME_RANGE_START => DATEADD('day', -7, CURRENT_TIMESTAMP()))) t
+  ON e.LAST_EVENT BETWEEN t.QUERY_START_TIME AND COALESCE(t.COMPLETED_TIME, CURRENT_TIMESTAMP())
+ORDER BY e.LAST_EVENT DESC;
+```
+
+Two caveats on the baseline. It only covers **instrumented** runs (2026-08-19 onward), so the
+pre-port comparison is 3 runs, not the full history — the 10:07 hang predates the emitter and does
+not appear. And `INFORMATION_SCHEMA.TASK_HISTORY` retains 7 days, so capture the pre-port numbers
+**before** starting the port rather than expecting to reconstruct them later.
 
 ## Critical files
 
