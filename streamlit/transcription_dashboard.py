@@ -165,7 +165,7 @@ def main():
     with tab4:
         tab_analytics.render(df)
     with tab5:
-        tab_browse.render(df)
+        tab_browse.render(session, df)
 
     # Footer
     st.markdown("---")

@@ -11,7 +11,7 @@ from sf_data import get_speaker_segments
 from sf_segments import display_speaker_transcript
 
 
-def render(df):
+def render(session, df):
     st.header("📋 Browse All Data")
 
     # Filters

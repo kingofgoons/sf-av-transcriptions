@@ -79,6 +79,22 @@ navigation, which restructures the app. Use flat tab_*.py modules instead."
 fi
 
 # ---------------------------------------------------------------------------
+# 0. PRE-FLIGHT. Catch NAME errors before they reach the browser.
+#
+# `python -m compileall` proves a module PARSES; it does not prove the names it
+# references exist. On 2026-08-19 the first modular deploy shipped two runtime-fatal
+# bugs that compiled fine - a missing `from datetime import datetime` in sf_exports,
+# and tab_browse using `session` without accepting it as a parameter. Both surfaced
+# only as "Application error: name 'datetime' is not defined" in the app. This gate
+# exists so that cannot happen again.
+# ---------------------------------------------------------------------------
+echo "Running pre-flight checks..."
+PY_BIN="$(command -v python3 || command -v python)"
+"${PY_BIN}" "${SCRIPT_DIR}/lint_dashboard.py" "${APP_DIR}" \
+    || fail "Pre-flight failed. Fix the problems above before deploying."
+echo ""
+
+# ---------------------------------------------------------------------------
 # Resolve object names from the config store. No names are hard-coded here.
 # ---------------------------------------------------------------------------
 echo "Reading config from ${CONFIG_STAGE}..."
