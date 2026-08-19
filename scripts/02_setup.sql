@@ -355,6 +355,66 @@ BEGIN
 END;
 $$;
 
+--#############################################################################
+-- STREAMLIT APP ROLE (added 2026-08-19b)
+--#############################################################################
+--
+-- WHY A DEDICATED ROLE: warehouse-runtime Streamlit apps run with OWNER'S RIGHTS, so
+-- every viewer executes queries with the app owner's privileges. The dashboard was
+-- originally created by ACCOUNTADMIN, which meant adding a kickoff button or an upload
+-- control would let any viewer act with ACCOUNTADMIN reach. This role holds only what
+-- the dashboard actually needs.
+--
+-- CRITICAL PLATFORM CONSTRAINT: `GRANT OWNERSHIP ON STREAMLIT` is NOT SUPPORTED
+-- ("Unsupported feature GRANT/REVOKE OWNERSHIP ON STREAMLIT"). A Streamlit app runs as
+-- the role that CREATED it, and that cannot be changed after the fact. The only way to
+-- change the owner is to recreate the object while using the target role. Consequence
+-- for deploys: `snow streamlit deploy` runs as the connection's role, so it MUST be run
+-- with --role set to the app role, or the app silently comes back owned by the
+-- connection role. See documents/architecture/dashboard.md.
+--
+-- Deliberately NOT granted:
+--   INSERT on the run-events table - the app only reads progress; the notebook writes it
+--   READ SESSION                   - only needed if the app calls context functions
+--   Anything on the compute pool   - warehouse runtime does not use one
+EXECUTE IMMEDIATE $$
+DECLARE
+    approle STRING := $PROJECT_APP_ROLE;
+    sch     STRING := $FQ_SCHEMA;
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE ROLE IF NOT EXISTS ' || approle;
+
+    EXECUTE IMMEDIATE 'GRANT USAGE ON DATABASE '  || $PROJECT_DB || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT USAGE ON SCHEMA '    || sch         || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT USAGE ON WAREHOUSE ' || $PROJECT_WH || ' TO ROLE ' || approle;
+
+    -- Read what the dashboard displays
+    EXECUTE IMMEDIATE 'GRANT SELECT ON TABLE ' || sch || '.' || $PROJECT_RESULTS_TABLE   || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT SELECT ON TABLE ' || sch || '.' || $PROJECT_RUN_EVENTS_TABLE || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT SELECT ON VIEW '  || sch || '.' || $PROJECT_RUN_STATUS_VIEW  || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT SELECT ON VIEW '  || sch || '.TRANSCRIPTION_SUMMARY TO ROLE ' || approle;
+
+    -- Trigger transcription. OPERATE is the minimum for EXECUTE TASK and cannot alter
+    -- or drop the task. Verified working from an owner's-rights context 2026-08-19.
+    EXECUTE IMMEDIATE 'GRANT OPERATE ON TASK ' || sch || '.' || $PROJECT_TASK_TRANSCRIBE || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT USAGE ON PROCEDURE ' || sch || '.TRANSCRIBE_IF_NEW_FILES() TO ROLE ' || approle;
+
+    -- Upload media. WRITE for put_stream, READ for DIRECTORY()/LIST. Note that REMOVE is
+    -- blocked under owner's rights regardless, so the app can never delete stage files.
+    EXECUTE IMMEDIATE 'GRANT READ, WRITE ON STAGE ' || sch || '.' || $PROJECT_STAGE_AV || ' TO ROLE ' || approle;
+
+    -- Needed to create/replace the app object itself
+    EXECUTE IMMEDIATE 'GRANT CREATE STREAMLIT ON SCHEMA ' || sch || ' TO ROLE ' || approle;
+    EXECUTE IMMEDIATE 'GRANT READ ON STAGE ' || sch || '.STREAMLIT_STAGE TO ROLE ' || approle;
+
+    -- Put the role in the standard hierarchy so SYSADMIN, and therefore ACCOUNTADMIN,
+    -- retains access to the app after ownership moves.
+    EXECUTE IMMEDIATE 'GRANT ROLE ' || approle || ' TO ROLE SYSADMIN';
+
+    RETURN approle || ' ready';
+END;
+$$;
+
 -- Sample queries to test after transcription:
 /*
 -- View all transcriptions
