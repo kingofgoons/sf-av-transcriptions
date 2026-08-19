@@ -72,7 +72,37 @@ support case. The job-service port remains the fix.
 
 ## Remaining work
 
-### 1. Fix the temp-WAV leak on failure paths
+### 0. STATUS: the ledger is BUILT and DEPLOYED but NOT YET VALIDATED on real hardware
+
+Implemented 2026-08-19 (commit `9e3fd8a`) and deployed to `TRANSCRIBE_AV_FILES_V2`. Item 1 below
+(the temp-WAV `finally` fix) is **done** in the same commit.
+
+Deliberately **not** validated with a dedicated run — that costs a GPU spin-up and a 3-file run
+carries ~75% hang odds plus manual pool reclamation, and the ledger produces its data for free on
+the next genuine transcription. So it will fire whenever real work next arrives.
+
+**On the first real run, check these three things.** They are the parts that could only be tested
+against a simulated `/proc` locally, because macOS has no `/proc`:
+
+```sql
+SELECT TIMESTAMP, LEFT(VALUE::VARCHAR, 150) AS LINE
+FROM SNOWFLAKE.TELEMETRY.EVENTS
+WHERE RESOURCE_ATTRIBUTES:"snow.executable.name"::VARCHAR = 'TRANSCRIBE_AV_FILES_V2'
+  AND RECORD_TYPE = 'LOG'
+  AND VALUE::VARCHAR LIKE '[LEDGER%'
+ORDER BY TIMESTAMP;
+```
+
+1. **`fd=` and `os_children=` are real numbers, not `-1`.** `-1` means the `/proc` read failed in
+   the container, so the two most useful metrics are blind and the code needs fixing.
+2. **`[LEDGER RECONCILE]` reports `OK`**, with `created` == `removed` and `on_disk=0`. A `LEAK`
+   verdict on a clean run means the `finally` fix is wrong.
+3. **On a multi-file run, compare `fd`/`threads`/`os_children` across the per-file `START` lines.**
+   Flat means no accumulation and the race conclusion stands. Rising means there IS a per-file
+   leak, which would reopen the question this plan was written to close — that is the one result
+   that would change the diagnosis.
+
+### 1. Fix the temp-WAV leak on failure paths — DONE (commit `9e3fd8a`)
 
 Real defect, low severity. In `transcribe_media_file` (cell 19) the cleanup
 
@@ -90,6 +120,11 @@ batch it wastes container disk, and the same bug would matter more in the job-se
 where the work directory may be a mounted volume. Wrap in `try/finally`. **Carry the fix into the
 port, not just the notebook.**
 
+**Resolution (commit `9e3fd8a`):** moved into a `finally` block, with `audio_path` bound *before*
+the `try` so the `finally` cannot raise `NameError` on an early failure. Paired
+`LEDGER['wav_created']` / `LEDGER['wav_removed']` counters make it verifiable rather than assumed.
+Still needs confirming on a real run \u2014 see item 0.
+
 ### 2. Confirm the 8.5 MB CUDA residue is inert
 
 `allocated=8519680` (~8.5 MB) survives `del model` + `empty_cache()` + `ipc_collect()` on 4 of 5
@@ -97,16 +132,17 @@ runs. It does not correlate with hangs, so this is hygiene, not a fix. Determine
 torch's own context or a retained tensor reference. If a retained reference, clear it; if torch
 context, document it as expected and stop looking.
 
-### 3. Capture the census at hang time, not just teardown time
+### 3. Capture the census at hang time, not just teardown time — PARTLY DONE
 
-The current census prints during cell 35, **before** the hang manifests, so it shows state at
+The teardown census prints during cell 35, **before** the hang manifests, so it shows state at
 teardown-start. The faulthandler dumps cover the after-state but report only threads *with frames*.
-To compare like with like, have the `HANG_FORENSICS` watchdog print `threading.enumerate()` and
-`multiprocessing.active_children()` alongside each periodic dump.
 
-Cheap and additive: it costs one extra print per 120s dump on hung runs and nothing on healthy
-ones. Do this **before** the port lands, since it is the last chance to gather notebook-side
-evidence.
+The per-file ledger snapshots now give a much better before/during picture. What is still missing is
+a snapshot **inside the watchdog**: have the `HANG_FORENSICS` timer print `ledger_snapshot()`
+alongside each periodic dump, so the wedged state is directly comparable to the per-file baselines.
+
+Cheap and additive: one extra line per 120s dump on hung runs, nothing on healthy ones. Do this
+**before** the port lands, since it is the last chance to gather notebook-side evidence.
 
 ### 4. Package the evidence for Snowflake support
 
