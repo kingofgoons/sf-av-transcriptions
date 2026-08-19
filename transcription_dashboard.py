@@ -82,6 +82,57 @@ def get_snowflake_connection():
         st.info("Make sure you're running this in Snowflake's Streamlit environment.")
         return None
 
+
+####################################
+# OBJECT NAMES
+####################################
+#
+# Resolved from the app's OWN session context rather than hardcoded. Warehouse-runtime
+# Streamlit apps run with owner's rights and "use the database and schema that the app
+# was created in", so this is guaranteed to point at the deployment the app belongs to
+# and cannot drift from scripts/00_config.sql.
+#
+# WHY THIS EXISTS: every query in this file used to reference TRANSCRIPTION_RESULTS
+# UNQUALIFIED, which worked only by accident of session context - nothing in the file
+# proved it targeted V2 rather than the retired V1 deployment. The status panel also
+# needs objects that will NOT resolve implicitly (TASK_HISTORY, DIRECTORY), so explicit
+# names became a hard requirement.
+
+_session_for_names = get_snowflake_connection()
+if _session_for_names is not None:
+    try:
+        _DB = _session_for_names.get_current_database().replace('"', '')
+        _SC = _session_for_names.get_current_schema().replace('"', '')
+        FQ_SCHEMA = f"{_DB}.{_SC}"
+    except Exception:
+        _DB, _SC = 'TRANSCRIPTION_DB_V2', 'TRANSCRIPTION_SCHEMA_V2'
+        FQ_SCHEMA = f"{_DB}.{_SC}"
+else:
+    _DB, _SC = 'TRANSCRIPTION_DB_V2', 'TRANSCRIPTION_SCHEMA_V2'
+    FQ_SCHEMA = f"{_DB}.{_SC}"
+
+T_RESULTS    = f"{FQ_SCHEMA}.TRANSCRIPTION_RESULTS"
+T_RUN_EVENTS = f"{FQ_SCHEMA}.TRANSCRIPTION_RUN_EVENTS"
+V_RUN_STATUS = f"{FQ_SCHEMA}.V_TRANSCRIPTION_RUN_STATUS"
+STAGE_AV     = f"{FQ_SCHEMA}.AUDIO_VIDEO_STAGE"
+TASK_NAME    = 'TRANSCRIBE_NEW_FILES_TASK_V2'
+FQ_TASK      = f"{FQ_SCHEMA}.{TASK_NAME}"
+FQ_GATE_PROC = f"{FQ_SCHEMA}.TRANSCRIBE_IF_NEW_FILES"
+
+# Hard platform limit for st.file_uploader on a WAREHOUSE runtime. Not configurable -
+# only container runtimes can raise it via server.maxUploadSize. Measured against this
+# corpus, 18% of existing recordings (80 of 443) exceed it, up to 1.7 GB, so this is a
+# convenience path for small files and NOT a replacement for av.uploader.
+MAX_UPLOAD_MB = 200
+
+# Media extensions the notebook actually globs for. Anything else is ignored by the
+# pipeline, so uploading it would silently do nothing.
+SUPPORTED_EXTS = ('mp3', 'wav', 'm4a', 'flac', 'aac', 'ogg',
+                  'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv')
+
+# Progress model, mirroring scripts/02_setup.sql and the notebook emitter.
+PHASE_TOTAL = 6
+
 def load_transcription_data(session, limit=1000):
     """Load transcription data from Snowflake"""
     if session is None:
@@ -109,7 +160,7 @@ def load_transcription_data(session, limit=1000):
         TO_VARCHAR(NEXT_STEPS) AS NEXT_STEPS,
         TO_VARCHAR(DECISIONS_MADE) AS DECISIONS_MADE,
         TO_VARCHAR(QUESTIONS_RAISED) AS QUESTIONS_RAISED
-    FROM TRANSCRIPTION_RESULTS 
+    FROM {T_RESULTS} 
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
     LIMIT {limit}
     """
@@ -129,31 +180,31 @@ def get_summary_stats(session):
     
     try:
         # Total files
-        result = session.sql("SELECT COUNT(*) as count FROM TRANSCRIPTION_RESULTS").to_pandas()
+        result = session.sql(f"SELECT COUNT(*) as count FROM {T_RESULTS}").to_pandas()
         stats['total_files'] = result.iloc[0, 0] if not result.empty else 0
         
         # Total duration in hours
-        result = session.sql("SELECT SUM(AUDIO_DURATION_SECONDS)/3600 as hours FROM TRANSCRIPTION_RESULTS WHERE AUDIO_DURATION_SECONDS IS NOT NULL").to_pandas()
+        result = session.sql(f"SELECT SUM(AUDIO_DURATION_SECONDS)/3600 as hours FROM {T_RESULTS} WHERE AUDIO_DURATION_SECONDS IS NOT NULL").to_pandas()
         stats['total_duration'] = result.iloc[0, 0] if not result.empty and result.iloc[0, 0] is not None else 0
         
         # Average processing time
-        result = session.sql("SELECT AVG(PROCESSING_TIME_SECONDS) as avg_time FROM TRANSCRIPTION_RESULTS").to_pandas()
+        result = session.sql(f"SELECT AVG(PROCESSING_TIME_SECONDS) as avg_time FROM {T_RESULTS}").to_pandas()
         stats['avg_processing_time'] = result.iloc[0, 0] if not result.empty else 0
         
         # Number of languages
-        result = session.sql("SELECT COUNT(DISTINCT DETECTED_LANGUAGE) as count FROM TRANSCRIPTION_RESULTS").to_pandas()
+        result = session.sql(f"SELECT COUNT(DISTINCT DETECTED_LANGUAGE) as count FROM {T_RESULTS}").to_pandas()
         stats['languages'] = result.iloc[0, 0] if not result.empty else 0
         
         # Files with speaker data
-        result = session.sql("SELECT COUNT(*) as count FROM TRANSCRIPTION_RESULTS WHERE TRANSCRIPT_WITH_SPEAKERS IS NOT NULL").to_pandas()
+        result = session.sql(f"SELECT COUNT(*) as count FROM {T_RESULTS} WHERE TRANSCRIPT_WITH_SPEAKERS IS NOT NULL").to_pandas()
         stats['files_with_speakers'] = result.iloc[0, 0] if not result.empty else 0
         
         # Average speakers per file
-        result = session.sql("SELECT AVG(SPEAKER_COUNT) as avg_speakers FROM TRANSCRIPTION_RESULTS WHERE SPEAKER_COUNT > 0").to_pandas()
+        result = session.sql(f"SELECT AVG(SPEAKER_COUNT) as avg_speakers FROM {T_RESULTS} WHERE SPEAKER_COUNT > 0").to_pandas()
         stats['avg_speakers'] = result.iloc[0, 0] if not result.empty and result.iloc[0, 0] is not None else 0
 
         # Distinct accounts
-        result = session.sql("SELECT COUNT(DISTINCT ACCOUNT_NAME) as count FROM TRANSCRIPTION_RESULTS WHERE ACCOUNT_NAME IS NOT NULL").to_pandas()
+        result = session.sql(f"SELECT COUNT(DISTINCT ACCOUNT_NAME) as count FROM {T_RESULTS} WHERE ACCOUNT_NAME IS NOT NULL").to_pandas()
         stats['account_count'] = result.iloc[0, 0] if not result.empty else 0
         
     except Exception as e:
@@ -174,7 +225,7 @@ def get_speaker_segments(session, file_name):
         SPEAKER_COUNT,
         DETECTED_LANGUAGE,
         AUDIO_DURATION_SECONDS
-    FROM TRANSCRIPTION_RESULTS 
+    FROM {T_RESULTS} 
     WHERE FILE_NAME = '{file_name}' 
     AND TRANSCRIPT_WITH_SPEAKERS IS NOT NULL
     """
@@ -234,7 +285,7 @@ def search_transcriptions(session, search_term, file_type=None, language=None, d
         MEETING_TITLE,
         ACCOUNT_NAME,
         TO_CHAR(CALL_START_TS, 'YYYY-MM-DD') AS CALL_START_TS
-    FROM TRANSCRIPTION_RESULTS 
+    FROM {T_RESULTS} 
     WHERE {where_clause}
     ORDER BY TRANSCRIPTION_TIMESTAMP DESC 
     LIMIT 50
@@ -839,6 +890,191 @@ def srt_download_link(content, filename, label):
     )
     st.markdown(href, unsafe_allow_html=True)
 
+
+####################################
+# PIPELINE STATUS
+####################################
+#
+# These are the only functions in this file that reach outside TRANSCRIPTION_RESULTS.
+# They must NOT be cached: the whole point is a live view. (This file has no
+# @st.cache_data anywhere, so there is nothing to clear.)
+
+def get_run_status(session):
+    """Latest run state from V_TRANSCRIPTION_RUN_STATUS. Returns dict or None."""
+    if session is None:
+        return None
+    try:
+        df = session.sql(f"""
+            SELECT RUN_ID, RUN_SOURCE, STATUS, DERIVED_STATE, IS_ACTIVE,
+                   PHASE, PHASE_NUM, PHASE_TOTAL,
+                   FILE_INDEX, FILE_TOTAL, CURRENT_FILE,
+                   FILE_STEP, FILE_STEP_NUM, FILE_STEP_TOTAL,
+                   UNITS_DONE, UNITS_TOTAL, PCT_COMPLETE,
+                   SECONDS_SINCE_HEARTBEAT, MESSAGE, ERROR_MESSAGE,
+                   TO_CHAR(LAST_HEARTBEAT_AT, 'YYYY-MM-DD HH24:MI:SS') AS LAST_HEARTBEAT_AT
+            FROM {V_RUN_STATUS}
+            ORDER BY LAST_HEARTBEAT_AT DESC
+            LIMIT 1
+        """).to_pandas()
+        return None if df.empty else df.iloc[0].to_dict()
+    except Exception as e:
+        st.warning(f"Could not read run status: {e}")
+        return None
+
+
+def get_task_state(session):
+    """Most recent task run state, straight from TASK_HISTORY.
+
+    This is the AUTHORITATIVE answer to "is the container still up?". The notebook
+    cannot report its own clean exit - the snowbook shutdown hang happens after the
+    last cell runs, so a hung run still emits CELLS_COMPLETE. Only the task knows
+    whether EXECUTE NOTEBOOK actually returned.
+    """
+    if session is None:
+        return None
+    try:
+        df = session.sql(f"""
+            SELECT STATE,
+                   TO_CHAR(SCHEDULED_TIME, 'YYYY-MM-DD HH24:MI:SS') AS SCHEDULED_TIME,
+                   DATEDIFF('second', QUERY_START_TIME,
+                            COALESCE(COMPLETED_TIME, CURRENT_TIMESTAMP())) AS ELAPSED_SEC,
+                   ERROR_CODE,
+                   LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE,
+                   LEFT(COALESCE(RETURN_VALUE, ''), 200)  AS RETURN_VALUE
+            FROM TABLE({_DB}.INFORMATION_SCHEMA.TASK_HISTORY(
+                TASK_NAME => '{TASK_NAME}',
+                SCHEDULED_TIME_RANGE_START => DATEADD('hour', -6, CURRENT_TIMESTAMP())))
+            ORDER BY SCHEDULED_TIME DESC
+            LIMIT 1
+        """).to_pandas()
+        return None if df.empty else df.iloc[0].to_dict()
+    except Exception as e:
+        st.warning(f"Could not read task history: {e}")
+        return None
+
+
+def get_backlog(session, refresh=True):
+    """Untranscribed files on the stage.
+
+    Uses ALTER STAGE REFRESH + a DIRECTORY join on FILE_NAME - deliberately the SAME
+    logic the task gate uses, so the UI and the gate can never disagree.
+
+    Do NOT substitute SYSTEM$STREAM_HAS_DATA here: nothing consumes AV_STAGE_STREAM_V2,
+    so it reports TRUE permanently.
+
+    The refresh is REQUIRED, not cosmetic - PUT and put_stream do not register files in
+    the directory table, so a freshly uploaded file is invisible without it.
+    """
+    if session is None:
+        return pd.DataFrame()
+    try:
+        if refresh:
+            session.sql(f"ALTER STAGE {STAGE_AV} REFRESH").collect()
+        return session.sql(f"""
+            SELECT d.RELATIVE_PATH AS FILE_NAME,
+                   ROUND(d.SIZE / 1048576.0, 1) AS SIZE_MB,
+                   TO_CHAR(d.LAST_MODIFIED, 'YYYY-MM-DD HH24:MI') AS LAST_MODIFIED
+            FROM DIRECTORY(@{STAGE_AV}) d
+            LEFT JOIN {T_RESULTS} t ON d.RELATIVE_PATH = t.FILE_NAME
+            WHERE t.FILE_NAME IS NULL
+            ORDER BY d.LAST_MODIFIED DESC
+        """).to_pandas()
+    except Exception as e:
+        st.warning(f"Could not read stage backlog: {e}")
+        return pd.DataFrame()
+
+
+# Visual treatment per state. Follows the existing house idiom in this file: a left
+# accent bar plus tinted background, as used for match/context highlighting.
+STATE_STYLE = {
+    'RUNNING':                  ('#1f77b4', '#eaf2fb', 'RUNNING',           'Transcription in progress'),
+    'FINISHING':                ('#1f77b4', '#eaf2fb', 'FINISHING',         'Work committed, container winding down'),
+    'CELLS_COMPLETE':           ('#4CAF50', '#eaf7ea', 'COMPLETE',          'All notebook cells finished'),
+    'SUCCEEDED':                ('#4CAF50', '#eaf7ea', 'SUCCEEDED',         'Run completed cleanly'),
+    'WORK_COMPLETE_NOT_EXITED': ('#FF9800', '#fff4e5', 'HUNG (work saved)', 'Transcripts were written but the container has not exited. Known snowbook shutdown hang - the data is safe.'),
+    'STALLED':                  ('#FF5722', '#ffece7', 'STALLED',           'No heartbeat for over 10 minutes'),
+    'FAILED':                   ('#9E9E9E', '#f5f5f5', 'FAILED',            'Run reported a failure'),
+}
+
+
+def render_status_panel(session, refresh_stage=False):
+    """Live pipeline status: phase N of M, file N of M, step N of M, plus an exact
+    discrete completeness percentage.
+
+    That percentage is a MEASUREMENT, not an estimate - the notebook counts a work unit
+    only when it actually finishes, with no time-based interpolation.
+
+    refresh_stage=False by default ON PURPOSE. ALTER STAGE REFRESH walks the whole stage
+    (300+ files here), so doing it on every 5-second poll would be real, pointless
+    warehouse spend. It only needs to run when files may have changed: on explicit
+    refresh, and immediately after an upload.
+
+    Returns (run, backlog_df, n_backlog, state) so the controls below reuse exactly the
+    same state and cannot disagree with the panel about whether a run is active.
+    """
+    run = get_run_status(session)
+    backlog = get_backlog(session, refresh=refresh_stage)
+    n_backlog = 0 if backlog is None or backlog.empty else len(backlog)
+
+    if run is None:
+        accent, bg, label, blurb = '#9E9E9E', '#f5f5f5', 'IDLE', 'No pipeline runs recorded yet'
+        state = 'IDLE'
+    else:
+        state = run.get('DERIVED_STATE') or 'RUNNING'
+        accent, bg, label, blurb = STATE_STYLE.get(state, ('#9E9E9E', '#f5f5f5', state, ''))
+
+        # Cross-check the task. A CELLS_COMPLETE run whose task is still EXECUTING means
+        # the container has not exited - that is the hang, and only TASK_HISTORY knows.
+        if state == 'CELLS_COMPLETE':
+            task = get_task_state(session)
+            if task and task.get('STATE') == 'EXECUTING':
+                accent, bg, label = '#FF9800', '#fff4e5', 'HUNG (work saved)'
+                blurb = (f"All cells finished but the task is still EXECUTING after "
+                         f"{task.get('ELAPSED_SEC')}s. Known snowbook shutdown hang - "
+                         f"transcripts are already saved.")
+                state = 'WORK_COMPLETE_NOT_EXITED'
+
+    detail_lines = []
+    if run is not None:
+        if run.get('PHASE'):
+            detail_lines.append(f"Phase {run.get('PHASE_NUM')} of {run.get('PHASE_TOTAL')} "
+                                f"&mdash; <b>{run.get('PHASE')}</b>")
+        if run.get('FILE_TOTAL'):
+            fi = run.get('FILE_INDEX')
+            fname = run.get('CURRENT_FILE') or ''
+            pos = (f"File {fi} of {run.get('FILE_TOTAL')}" if fi
+                   else f"{run.get('FILE_TOTAL')} file(s)")
+            detail_lines.append(f"{pos}{(' &mdash; ' + fname) if fname else ''}")
+        if run.get('FILE_STEP'):
+            detail_lines.append(f"Step {run.get('FILE_STEP_NUM')} of "
+                                f"{run.get('FILE_STEP_TOTAL')} &mdash; {run.get('FILE_STEP')}")
+        if run.get('UNITS_TOTAL'):
+            pct = run.get('PCT_COMPLETE')
+            detail_lines.append(
+                f"{run.get('UNITS_DONE')} of {run.get('UNITS_TOTAL')} units complete"
+                + (f" ({pct}%)" if pct is not None else ""))
+        if run.get('MESSAGE'):
+            detail_lines.append(f"<i>{run.get('MESSAGE')}</i>")
+        if run.get('ERROR_MESSAGE'):
+            detail_lines.append(f"<b style='color:#c62828'>{run.get('ERROR_MESSAGE')}</b>")
+        hb = run.get('SECONDS_SINCE_HEARTBEAT')
+        if hb is not None:
+            detail_lines.append(
+                f"<span class='timestamp'>last heartbeat {int(hb)}s ago &middot; "
+                f"run {str(run.get('RUN_ID'))[:8]} &middot; {run.get('RUN_SOURCE')}</span>")
+
+    st.markdown(
+        f"""<div style="background-color:{bg}; padding:1rem; border-radius:0.5rem;
+                    border-left:0.25rem solid {accent}; margin:0.5rem 0;">
+            <div style="font-weight:bold; color:{accent}; font-size:1.05rem;">&#9679; {label}</div>
+            <div style="color:#555; font-size:0.85rem; margin-bottom:0.4rem;">{blurb}</div>
+            {''.join(f"<div style='color:#333; line-height:1.5;'>{d}</div>" for d in detail_lines)}
+        </div>""",
+        unsafe_allow_html=True)
+
+    return run, backlog, n_backlog, state
+
+
 def main():
     st.title("🎵 Audio/Video Transcription Dashboard")
     st.markdown("Explore and analyze your transcribed audio and video files")
@@ -863,7 +1099,45 @@ def main():
 
         st.divider()
         debug_mode = st.checkbox("Debug Mode", value=False, help="Show DataFrame dtypes, sample values, and full error tracebacks")
-    
+
+        st.divider()
+        st.subheader("Pipeline Status")
+        # Default OFF deliberately. Each poll runs a status query and a backlog query, so
+        # leaving this on idles the warehouse awake for no benefit. Turn it on while
+        # watching a run.
+        auto_refresh = st.checkbox(
+            "Auto-refresh (5s)", value=False,
+            help="Polls run status every 5 seconds. Only useful while a transcription is "
+                 "running; costs a warehouse query per poll.")
+        deep_refresh = st.button(
+            "🔃 Rescan stage",
+            help="Runs ALTER STAGE REFRESH so newly uploaded files become visible to the "
+                 "backlog count. Not done on every poll because it walks the whole stage.")
+
+    # ---- Pipeline status and controls ---------------------------------------------
+    # Rendered ABOVE the empty-data guard on purpose: this block is most useful exactly
+    # when TRANSCRIPTION_RESULTS is empty (a fresh deployment, or watching the first run).
+    #
+    # Wrapped in st.fragment when available so auto-refresh re-runs ONLY this block.
+    # That matters for cost: this file has no @st.cache_data, so all 10 dashboard queries
+    # re-execute on every full rerun, and an unscoped 5-second loop would hammer the
+    # warehouse. st.fragment needs Streamlit >= 1.37; warehouse runtimes pin an older
+    # version on some accounts, so fall back to a static render rather than crashing.
+    st.subheader("⚙️ Pipeline Status")
+
+    def _status_block():
+        render_status_panel(session, refresh_stage=deep_refresh)
+
+    if auto_refresh and hasattr(st, 'fragment'):
+        st.fragment(run_every="5s")(_status_block)()
+    else:
+        _status_block()
+        if auto_refresh:
+            st.caption("Auto-refresh needs Streamlit 1.37+ (st.fragment). "
+                       "Use 🔃 Rescan stage or reload to update.")
+
+    st.divider()
+
     # Load main dataset
     df = load_transcription_data(session, data_limit)
 
@@ -898,10 +1172,20 @@ def main():
         st.markdown("""
         <div class="info-box">
             <h4>⚠️ No transcription data found</h4>
-            <p>Make sure you've run the transcription notebook first and have data in the TRANSCRIPTION_RESULTS table.</p>
+            <p>Nothing in TRANSCRIPTION_RESULTS yet. Upload media and start a run using the
+            controls above &mdash; the data tabs will appear once a transcription completes.</p>
         </div>
         """, unsafe_allow_html=True)
-        st.stop()
+        # `return`, NOT st.stop(). Both stop the data tabs from rendering, but the status
+        # panel and controls above have already been drawn by this point, which is the
+        # whole reason they were moved above this guard. st.stop() here would be
+        # equivalent, but return makes the intent explicit and cannot be mistaken for the
+        # old behaviour of aborting before the panel existed.
+        #
+        # Do NOT "fix" this by guarding each tab with st.stop() instead: st.stop() halts
+        # the ENTIRE script, so a guard inside `with tab1:` silently prevents tabs 2-5
+        # from rendering at all.
+        return
     
     # Get summary stats
     stats = get_summary_stats(session)
@@ -1227,7 +1511,7 @@ def main():
                 st.metric("Duration", f"{duration:.1f}s" if pd.notna(duration) else "N/A")
             with col4:
                 speakers = file_row.get('SPEAKER_COUNT', 0)
-                st.metric("Speakers", f"{speakers}" if speakers > 0 else "N/A")
+                st.metric("Speakers", f"{speakers}" if (speakers or 0) > 0 else "N/A")
             with col5:
                 account_val = file_row.get('ACCOUNT_NAME')
                 st.metric("Account", account_val if pd.notna(account_val) else "—")
@@ -1492,7 +1776,7 @@ def main():
                 
                 with col4:
                     speakers = row.get('SPEAKER_COUNT', 0)
-                    st.text(f"{speakers}" if speakers > 0 else "N/A")
+                    st.text(f"{speakers}" if (speakers or 0) > 0 else "N/A")
                 
                 with col5:
                     duration = row['AUDIO_DURATION_SECONDS']
@@ -1505,7 +1789,7 @@ def main():
                 
                 # Full transcript in expander
                 with st.expander("View Full Transcript"):
-                    if row.get('SPEAKER_COUNT', 0) > 0:
+                    if (row.get('SPEAKER_COUNT') or 0) > 0:
                         # Show speaker segments if available
                         speaker_segments = get_speaker_segments(session, row['FILE_NAME'])
                         if speaker_segments:
