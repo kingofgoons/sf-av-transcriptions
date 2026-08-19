@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-08-19T15:00:00.000Z" agent="Cortex Code" version="24.0.0" type="device">
+  <diagram id="av-transcription-arch" name="AV Transcription Architecture">
+    <mxGraphModel dx="1900" dy="1050" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1020" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ===== Title ===== -->
+        <mxCell id="title" value="Audio/Video Transcription Pipeline &#8212; Snowflake Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=18;fontStyle=1;fontColor=#11567F;fontFamily=Arial;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="700" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Event-driven: upload fires EXECUTE TASK, gate launches GPU notebook only when there is real work" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontStyle=2;fontColor=#5B5B5B;fontFamily=Arial;" vertex="1" parent="1">
+          <mxGeometry x="40" y="50" width="800" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Local machine boundary ===== -->
+        <mxCell id="local-boundary" value="Local Machine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=12;fontStyle=1;verticalAlign=top;opacity=60;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="210" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="local-files" value="AUDIO_VIDEO_STAGE_FILES/&#xa;.mp4 / .mp3 recordings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="140" width="170" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="uploader" value="av.uploader/&#xa;upload_av_files.py&#xa;&#xa;key-pair auth as&#xa;AV_UPLOADER_SERVICE_USER" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="225" width="170" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="dashboard-local" value="streamlit/&#xa;transcription_dashboard.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="335" width="170" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ===== External source: Snowhouse (Gong) ===== -->
+        <mxCell id="snowhouse" value="Snowhouse&#xa;Gong call records&#xa;(external account)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="640" width="170" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Snowflake account boundary ===== -->
+        <mxCell id="sf-boundary" value="Snowflake &#8212; TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#11567F;strokeColor=#0A3A54;fontColor=#FFFFFF;fontFamily=Arial;fontSize=12;fontStyle=1;verticalAlign=top;opacity=20;" vertex="1" parent="1">
+          <mxGeometry x="290" y="100" width="1320" height="820" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Ingestion ===== -->
+        <mxCell id="av-stage" value="@AUDIO_VIDEO_STAGE&#xa;327 media files&#xa;(name hard-coded in notebook)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="320" y="150" width="180" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Orchestration ===== -->
+        <mxCell id="task" value="TRANSCRIBE_NEW_FILES_TASK_V2&#xa;&#xa;NO SCHEDULE &#8212; event-driven&#xa;USER_TASK_TIMEOUT_MS = 30 min" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="145" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gate" value="TRANSCRIBE_IF_NEW_FILES()&#xa;EXECUTE AS OWNER&#xa;&#xa;ALTER STAGE REFRESH&#xa;+ DIRECTORY() diff vs results&#xa;&#xa;no new files &#8594; SKIPPED&#xa;new files &#8594; launch notebook" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="275" width="200" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ===== GPU compute ===== -->
+        <mxCell id="pool-boundary" value="TRANSCRIPTION_GPU_POOL_V2 &#8212; GPU_NV_S, 1-3 nodes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#11567F;strokeColor=#0A3A54;fontColor=#FFFFFF;fontFamily=Arial;fontSize=10;fontStyle=1;verticalAlign=top;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="800" y="130" width="270" height="290" as="geometry" />
+        </mxCell>
+        <mxCell id="notebook" value="TRANSCRIBE_AV_FILES_V2&#xa;GPU Container Runtime&#xa;(cpython-3.10, snowbooks image)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="820" y="165" width="230" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="whisper" value="OpenAI Whisper&#xa;model: base&#xa;~0.035x realtime" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="820" y="255" width="105" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="cortex-complete" value="CORTEX.COMPLETE&#xa;summary +&#xa;parsed fields" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="945" y="255" width="105" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="ffmpeg" value="ffmpeg / ffprobe 6.1.1 &#8212; preinstalled in image" style="text;html=1;strokeColor=#cccccc;fillColor=#fafafa;align=center;fontSize=8;fontFamily=Arial;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="335" width="230" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Storage ===== -->
+        <mxCell id="results" value="TRANSCRIPTION_RESULTS&#xa;443 rows &#183; 23 columns&#xa;transcript, SRT, speakers,&#xa;summary fields" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="155" width="185" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gong-mirror" value="GONG_CALLS_MIRROR&#xa;50 rows" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="640" width="185" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="summary-view" value="TRANSCRIPTION_SUMMARY&#xa;(aggregate stats view)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="265" width="185" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="unified" value="UNIFIED_MEETINGS_V&#xa;493 rows&#xa;LOCAL 443 + GONG 50" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="410" width="185" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Consumption ===== -->
+        <mxCell id="search" value="MEETING_SEARCH&#xa;Cortex Search&#xa;TARGET_LAG 1 hr&#xa;arctic-embed-m-v1.5" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="300" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="semantic" value="MEETINGS_SEMANTIC_VIEW&#xa;Cortex Analyst model" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="400" width="170" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" value="MEETING_INTELLIGENCE&#xa;Cortex Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#75CDD7;strokeColor=#5AA8B0;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="490" width="170" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp" value="MEETING_INTELLIGENCE_MCP&#xa;MCP server for agent clients" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#75CDD7;strokeColor=#5AA8B0;fontColor=#000000;fontFamily=Arial;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="565" width="170" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Config store ===== -->
+        <mxCell id="config-store" value="TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS&#xa;00_config.sql&#xa;&#xa;single source of truth for all object names&#xa;loaded via EXECUTE IMMEDIATE FROM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="320" y="440" width="200" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Deprecated ===== -->
+        <mxCell id="deprecated" value="DEPRECATED &#8212; keep suspended&#xa;&#xa;AV_STAGE_STREAM_V2&#xa;(never consumed &#8594; gate passed forever)&#xa;REFRESH_STAGE_DIRECTORY_TASK_V2&#xa;RUN_TRANSCRIPTION_NOTEBOOK()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#666666;fontFamily=Arial;fontSize=9;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="440" width="200" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Hang annotation ===== -->
+        <mxCell id="hang-note" value="KNOWN CONSTRAINT &#8212; snowbook shutdown hang&#xa;&#xa;EXECUTE NOTEBOOK is SYNCHRONOUS, so the task&#xa;blocks for the notebook's whole lifetime.&#xa;&#xa;On MULTI-FILE runs the notebook finishes every cell&#xa;and writes its rows, then snowbook's script runner&#xa;waits forever in on_scriptrunner_ready while the main&#xa;thread serves gRPC &#8594; ~8,100s transport timeout.&#xa;&#xa;0/8 single-file runs hung &#183; 4/6 multi-file runs hung&#xa;Root-caused 2026-08-19 via faulthandler stacks.&#xa;Mitigation: 30-min task timeout caps the waste.&#xa;Fix: port to headless EXECUTE JOB SERVICE." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#7254A3;fontColor=#000000;fontFamily=Arial;fontSize=9;align=left;verticalAlign=top;spacingLeft=6;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="800" y="440" width="270" height="205" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Legend ===== -->
+        <mxCell id="legend-container" value="Legend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=11;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1650" y="120" width="215" height="215" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-sf" value="Snowflake-native object" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#29B5E8;strokeColor=#11567F;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="150" width="195" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-consumer" value="Consumer / agent surface" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#75CDD7;strokeColor=#5AA8B0;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="180" width="195" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-boundary" value="Account / pool boundary" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#11567F;strokeColor=#0A3A54;fontColor=#FFFFFF;fontFamily=Arial;fontSize=9;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="210" width="195" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-external" value="External / local (non-Snowflake)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="240" width="195" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-annotation" value="Constraint / callout" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#7254A3;fontColor=#000000;fontFamily=Arial;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="270" width="195" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-deprecated" value="Deprecated (dashed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#666666;fontFamily=Arial;fontSize=9;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="300" width="195" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Edges ===== -->
+        <mxCell id="e-files-uploader" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="local-files" target="uploader">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-uploader-stage" value="PUT (skips files already staged)" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="uploader" target="av-stage">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-uploader-task" value="EXECUTE TASK&#xa;(async, works on suspended task)" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="uploader" target="task">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-task-gate" value="CALL" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="task" target="gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-gate-stage" value="REFRESH + DIRECTORY()" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="gate" target="av-stage">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-gate-results" value="diff on FILE_NAME" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="gate" target="results">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-gate-notebook" value="EXECUTE NOTEBOOK&#xa;(synchronous)" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="gate" target="notebook">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-stage-notebook" value="GET media files" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="av-stage" target="notebook">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-notebook-whisper" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="notebook" target="whisper">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-whisper-cortex" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="whisper" target="cortex-complete">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cortex-results" value="INSERT (one per run)" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="cortex-complete" target="results">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-results-summary" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="results" target="summary-view">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-snowhouse-gong" value="scripts/06_sync_gong.sh&#xa;MERGE" style="endArrow=classic;html=1;strokeColor=#666666;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="snowhouse" target="gong-mirror">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-results-unified" value="LOCAL" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="results" target="unified">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-gong-unified" value="GONG" style="endArrow=classic;html=1;strokeColor=#29B5E8;strokeWidth=2;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="gong-mirror" target="unified">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-unified-search" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="unified" target="search">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-unified-semantic" style="endArrow=classic;html=1;strokeColor=#11567F;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="unified" target="semantic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-search-agent" style="endArrow=classic;html=1;strokeColor=#5AA8B0;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="search" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-semantic-agent" style="endArrow=classic;html=1;strokeColor=#5AA8B0;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="semantic" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-agent-mcp" style="endArrow=classic;html=1;strokeColor=#5AA8B0;strokeWidth=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="agent" target="mcp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-unified-dashboard" value="reads" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="unified" target="dashboard-local">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-config-gate" value="object names" style="endArrow=classic;html=1;strokeColor=#5B5B5B;strokeWidth=1;dashed=1;fontFamily=Arial;fontSize=9;" edge="1" parent="1" source="config-store" target="gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
