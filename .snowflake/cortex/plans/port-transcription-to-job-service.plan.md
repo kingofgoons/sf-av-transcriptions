@@ -4,11 +4,51 @@
 
 ### Why
 
-The ~2h07m hang is not in our code. Teardown diagnostics from a clean run show **0 multiprocessing children** and **2 non-daemon threads** — `asyncio_0` and `ScriptRunner.scriptThread` — that belong to the Snowflake notebook runtime (Container Runtime notebooks are Streamlit-hosted). Python's interpreter shutdown joins non-daemon threads, so if either fails to wind down the process blocks. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
+The ~2h07m hang is **not in our code, and this is now proven** rather than inferred.
 
-Important caveat, stated honestly: those diagnostics come from a run that **exited cleanly**, so the two threads are the plausible mechanism, not proven culprits. We do not yet have thread data from a hung run. The port is still the right move because a plain Python script has no Streamlit ScriptRunner and no IPython kernel at all — it removes the entire class of failure rather than betting on a specific thread.
+On 2026-08-19 a `faulthandler` watchdog was armed in the notebook teardown
+(`dump_traceback_later(120, repeat=True, exit=False)`, writing to a real fd via `sys.__stderr__`)
+and a hang was reproduced deliberately with the same 3-file workload that hung on 2026-08-18.
+The notebook finished all work and wrote its 3 rows normally, then dumps fired at +2min and
++4min with an **identical** frame:
 
-Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
+```
+Thread 0x00007fcf7d7fa6c0:
+  threading.py:355 in wait_for
+  snowbook/runtime/notebook_script_requests.py:232 in on_scriptrunner_ready
+  snowbook/runtime/notebook_script_runner.py:286 in _run_script_thread
+MAIN THREAD:
+  asyncio/base_events.py:603 in run_forever
+  snowbook/snowflake/snowflake_run_adaptor.py:264 in run_till_end
+  snowbook/snowflake/streamlit_base_adaptor.py:96 in start
+  snowbook/web/cli.py:211 in main
+```
+
+`snowbook`'s script runner parks forever in `on_scriptrunner_ready` waiting on a condition
+variable while the main thread sits in `asyncio run_forever` serving gRPC. **No notebook code is
+on any stack** — every cell has completed. This is inside Snowflake's runtime and cannot be
+fixed from the notebook. `EXECUTE NOTEBOOK` is synchronous, so the calling task blocks with it.
+
+**The hang is multi-file-only:** 0 of 8 single-file runs hung; 4 of 6 multi-file runs did. Any
+reproduction must use 3+ files.
+
+Three earlier hypotheses were **disproven** by the hung-run stacks and must not be
+re-investigated: lingering multiprocessing children (zero on every dump), GPU/CUDA cleanup (the
+hung run had cleanup and hung anyway), and `join_if_started` (present in healthy baselines
+only). The `resource_tracker: leaked semaphore` warning appears on healthy runs too and is
+noise.
+
+The port remains the right move, and the evidence strengthens it: a plain Python script has no
+`snowbook` script runner, no Streamlit host, and no IPython kernel, so it removes the entire
+failure class rather than betting on a specific thread.
+
+Switching notebook *varieties* (Warehouse vs Container Runtime, CPU vs GPU) would not help: all
+Snowflake notebooks are Streamlit-hosted, and Warehouse runtime cannot provide a GPU for Whisper.
+
+**Interim mitigation already in place:** `USER_TASK_TIMEOUT_MS = 1800000` (30 min, task-scoped)
+caps the waste. Rows still land before the hang, so the data is correct while the task reports
+FAILED. Diagnostic instrumentation (`HANG_FORENSICS = True`) is currently armed in the deployed
+notebook and should be turned off once the port lands.
 
 ### Key findings from research
 
@@ -64,7 +104,7 @@ graph TD
         U1[upload_av_files.py] -->|EXECUTE TASK| T1[TRANSCRIBE_NEW_FILES_TASK_V2]
         T1 --> G1["TRANSCRIBE_IF_NEW_FILES() owner rights"]
         G1 -->|EXECUTE NOTEBOOK, synchronous| N1[Streamlit notebook runtime]
-        N1 --> H1["work done in ~2min, then non-daemon threads block exit for ~2h07m"]
+        N1 --> H1["work done in ~2min, then snowbook script runner parks in on_scriptrunner_ready for ~2h07m"]
     end
 ```
 
@@ -126,7 +166,9 @@ Create `scripts/payload/transcribe_job.py`:
 
 Add `scripts/payload/requirements.txt` with `openai-whisper` and `pandas`.
 
-Note the model-name discrepancy to resolve during the port: the notebook uses `claude-sonnet-4-6`, while agents.md documents `claude-opus-4-5`. The notebook is the executing code; confirm which is intended.
+The Cortex model is **`claude-sonnet-4-6`**, verified against notebook line 1007. The earlier
+`claude-opus-4-5` reference in agents.md was stale documentation and has been corrected — port
+the notebook's value, and read it from config rather than hardcoding it again.
 
 ### 4. Validate the payload locally against a clone
 
@@ -159,7 +201,7 @@ Retire the headless notebook path while keeping the notebook for interactive use
 **Spike gates (task 1)** — do not proceed unless all pass:
 - `which ffmpeg` and `which ffprobe` both resolve; `ffmpeg -version` reports 6.x
 - `torch.cuda.is_available()` is True and names a GPU
-- OAuth session returns the expected role and a row count of 442
+- OAuth session returns the expected role and a row count of 443
 - The mounted AV stage volume lists media files
 
 **Payload parity (task 4):**
@@ -177,7 +219,11 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 **Regression guard:** confirm `TRANSCRIPTION_RESULTS` never drops below its pre-change count at any point. Take a zero-copy clone as a backup before the first write to the real table, matching the `TR_BACKUP_GOOD` pattern already in use.
 
-**Honest success criterion:** the hang is intermittent at roughly 50% of real-work runs, so a single clean job proves the pipeline works but does not prove the hang is gone. Treat it as resolved only after several consecutive real-work runs with no multi-hour tail — and keep the `USER_TASK_TIMEOUT_MS` cap in place until then.
+**Honest success criterion:** the hang is multi-file-specific — 4 of 6 multi-file runs hung, 0 of
+8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in
+the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only
+after several consecutive multi-file runs with no multi-hour tail. Keep the
+`USER_TASK_TIMEOUT_MS` cap in place until then.
 
 ## Critical files
 

@@ -1,5 +1,33 @@
 # Config Include Refactor
 
+> ## ✅ COMPLETE — verified 2026-08-19. DO NOT EXECUTE.
+>
+> This refactor shipped. Verified by sweeping every consuming SQL file: **all 8 now load config
+> via `EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql`**, with **zero
+> inline `SET PROJECT_*` blocks** outside `00_config.sql` itself and **zero V1 object literals** —
+> including `av.uploader/create_av_service_user.sql` and `cleanup_av_service_user.sql`, the two
+> files this plan flagged as V1 drift.
+>
+> **The script names below are pre-renumbering and no longer exist.** Current names:
+> `00_config.sql`, `01_bootstrap.sql`, `02_setup.sql`, `03_automate.sql`, `04_deploy_notebook.sh`,
+> `05_gong_objects.sql`, `06_sync_gong.sh`, `07_reset.sql`, `08_telemetry_debug.sql`,
+> `999_teardown.sql`, plus `publish_config.sh`.
+>
+> The config store is `TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql`, currently at
+> `CONFIG_REVISION = '2026-08-19a'`. To change any object name: edit `00_config.sql`, bump
+> `CONFIG_REVISION`, run `publish_config.sh`. Never paste a config block into a script.
+>
+> One known issue survives this refactor and is tracked in the port plan (task 5):
+> `scripts/03_automate.sql` still has bare `DECLARE...END;` blocks that fail under `snow sql -f`
+> and need wrapping in `EXECUTE IMMEDIATE $$ ... $$`.
+>
+> Procedure and diagram documentation now live in `documents/operations/runbook.md`.
+
+---
+
+<details>
+<summary>Original plan as executed (historical — script names are stale)</summary>
+
 ## Why
 
 The `SET PROJECT_*` block is duplicated across **7 SQL files**, and it has already drifted:
@@ -158,3 +186,5 @@ then SET TEARDOWN_BACKUP_TABLE = 'TRANSCRIPTION_DEPLOY.PUBLIC.TR_BACKUP_<yyyymmd
 - Stale staged config is the new failure mode, mitigated by the `CONFIG_REVISION` echo. If it proves annoying in practice, the table-based variant remains available.
 - `av.uploader/config.json` still separately duplicates database/schema/warehouse/task for the Python client. Out of scope here; noted as a follow-up (either generate it from `00_config.sql` or have the publish script assert they agree).
 - The pending Fix #1/#2 end-to-end test is unaffected — it needs a real recording and can happen before or after this refactor.
+
+</details>

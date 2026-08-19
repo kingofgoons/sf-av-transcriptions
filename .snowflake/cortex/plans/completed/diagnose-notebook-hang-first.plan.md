@@ -1,12 +1,42 @@
 ---
 name: "diagnose-notebook-hang-first"
 created: "2026-08-19T15:39:54.480Z"
-status: pending
+completed: "2026-08-19"
+status: complete
 ---
 
 # Diagnose the notebook hang with real evidence before porting anything
 
-> STATUS: PAUSED MID-EXECUTION on 2026-08-18 \~17:41 EDT. Read "RESUME HERE" first. There was a run IN FLIGHT when this was written, and there is UNRESTORED STATE (3 deleted transcript rows and a lowered task timeout). Do not skip the safety checks in "RESUME HERE".
+> ## ✅ COMPLETE — 2026-08-19. DO NOT EXECUTE. Retained for the evidence only.
+>
+> **The earlier "UNRESTORED STATE" warning below is obsolete and no longer true.** Verified
+> 2026-08-19 11:56 EDT: `TRANSCRIPTION_RESULTS` holds **443 rows with an untranscribed backlog of
+> 0**. All 3 deliberately-deleted transcripts were regenerated. There is **nothing to restore** —
+> do not attempt recovery from `TR_MULTIFILE_BACKUP` or `TR_HANGTEST_BACKUP`.
+>
+> The task timeout is intentionally left at `USER_TASK_TIMEOUT_MS = 1800000` (30 min,
+> task-scoped) as the interim mitigation. That is deliberate, not leftover state. The account
+> default is untouched at 3600000.
+>
+> **Outcome — the hang was root-caused.** `snowbook`'s script runner parks forever in
+> `on_scriptrunner_ready` on a condition variable while the main thread sits in `asyncio
+> run_forever`. No notebook code is on any stack; every cell has completed. Platform-side, not
+> fixable from the notebook. The hang is **multi-file-only** (0/8 single-file, 4/6 multi-file).
+>
+> Full root cause and the disproven hypotheses are recorded in
+> `port-transcription-to-job-service.plan.md` → Why, and in
+> `.cortex/skills/av-transcription-dev/references/known-issues.md` → issue #1.
+>
+> **Follow-on work lives in `port-transcription-to-job-service.plan.md`.** Bo decided not to file
+> a Snowflake support case.
+>
+> Two scratch backup tables remain and are safe to drop once you are satisfied:
+> `TR_MULTIFILE_BACKUP` (3 rows), `TR_HANGTEST_BACKUP` (1 row).
+
+---
+
+<details>
+<summary>Original plan as executed (historical — the "RESUME HERE" steps are all done)</summary>
 
 ---
 
@@ -184,3 +214,5 @@ Run the uploader from `av.uploader/` with **Python 3.9+** (use `/Users/blandsman
 | 4+ more multi-file runs all clean          | Reconsider: the earlier teardown cleanup may genuinely have mitigated it. Keep the timeout cap and let normal usage accumulate evidence. |
 
 Do not treat the hang as fixed on the strength of a few clean runs. It was intermittent at roughly 2/3 of multi-file runs, so several consecutive clean multi-file runs are needed before declaring it resolved.
+
+</details>
