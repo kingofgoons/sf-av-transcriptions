@@ -3,43 +3,39 @@
 # ONLY [theme] and [theme.sidebar] belong in this file. Per the Streamlit-in-Snowflake
 # configuration support matrix, warehouse runtimes support those two sections and NOT
 # [global], [logger], [client], [runner], [server], [browser] or [mapbox]. Adding any of
-# those here is silently ignored, so do not put server.maxUploadSize here expecting the
-# 200 MB file-upload cap to lift - on warehouse runtime that limit is not configurable at
-# all. Only a container runtime can raise it.
+# those is silently ignored, so do not put server.maxUploadSize here expecting the 200 MB
+# upload cap to lift - on warehouse runtime that limit is not configurable at all.
+#
+# DELIBERATELY CONSERVATIVE KEY SET. Only options that have existed in Streamlit for years
+# are used here. Newer ones (borderColor, chartCategoricalColors, baseRadius, linkColor,
+# [theme.sidebar]) are tempting but the warehouse runtime resolves an UNPINNED Streamlit,
+# so an option this account's build does not recognise risks the theme being dropped.
+# Visible brand treatment that needs newer features is done in CSS instead - see sf_theme.
+#
+# TINT CHOICE: secondaryBackgroundColor is #E8F4FB, a deliberately BLUER tint than the
+# brand's #F0F7FB. The first attempt used #F0F7FB and was indistinguishable from
+# Streamlit's default #F0F2F6 - the theme was applying correctly but nobody could tell.
+# #E8F4FB stays within the brand family while actually reading as blue on screen.
 #
 # WHY THERE IS NO CUSTOM FONT:
 # Snowflake's brand typeface is Lato, normally loaded from the Google Fonts CDN. That is
 # impossible here. Streamlit in Snowflake runs under a Content Security Policy that blocks
 # loading fonts (and any code) from external domains, and warehouse runtimes do not support
-# static file serving, so the font cannot be self-hosted either. `font = "sans serif"` is
-# therefore the honest choice. Do not add a [[theme.fontFaces]] block or an @font-face rule
-# pointing at fonts.googleapis.com - it will fail silently in the browser.
+# static file serving, so it cannot be self-hosted either. Do not add [[theme.fontFaces]]
+# or an @font-face rule pointing at fonts.googleapis.com - it fails silently in the browser.
 #
-# Colour values come from the Snowflake brand palette:
+# Snowflake brand palette:
 #   Snowflake Blue   #29B5E8   primary accent
-#   Mid Blue         #11567F   links, secondary
+#   Mid Blue         #11567F   links, subheadings
 #   Dark Blue        #003545   strong emphasis
-#   Light Blue Tint  #F0F7FB   card / widget backgrounds
-#   Near-White       #F8FBFC   sidebar, footer
+#   Light Blue Tint  #F0F7FB   card backgrounds
 #   Light Gray       #E0E8ED   borders
 #   Dark Gray        #333333   body text
-#
-# NOTE ON COMPATIBILITY: `linkColor` and the whole [theme.sidebar] section are newer
-# Streamlit options. On an older Streamlit build they are ignored rather than erroring, so
-# this file is safe across the versions warehouse runtime may resolve. The app does not
-# depend on them.
 
 [theme]
 base = "light"
 primaryColor = "#29B5E8"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F7FB"
+secondaryBackgroundColor = "#E8F4FB"
 textColor = "#333333"
-linkColor = "#11567F"
 font = "sans serif"
-
-[theme.sidebar]
-backgroundColor = "#F8FBFC"
-secondaryBackgroundColor = "#F0F7FB"
-primaryColor = "#29B5E8"
-textColor = "#333333"

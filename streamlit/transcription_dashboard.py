@@ -22,7 +22,7 @@ import sf_config
 from sf_config import get_snowflake_connection
 from sf_data import load_transcription_data, get_summary_stats
 from sf_pipeline import render_status_panel
-from sf_theme import inject_css
+from sf_theme import inject_css, brand_header
 
 import tab_overview
 import tab_search
@@ -43,15 +43,16 @@ inject_css()
 
 
 def main():
-    st.title("🎵 Audio/Video Transcription Dashboard")
-    st.markdown("Explore and analyze your transcribed audio and video files")
+    brand_header("Audio/Video Transcription",
+                 "Search, review and export meeting transcripts")
 
     session = get_snowflake_connection()
     if session is None:
         st.stop()
 
-    # Resolve fully-qualified object names from the app's own session context. Must happen
-    # before any module reads NAMES.* - see the note in sf_config.
+    # Resolve fully-qualified object names. Prefers the shared config view in
+    # TRANSCRIPTION_DEPLOY.PUBLIC so the dashboard, notebook and SQL scripts all derive
+    # names from one authored source. Must happen before any module reads NAMES.*
     sf_config.init(session)
 
     # ---- Sidebar ---------------------------------------------------------------
@@ -67,6 +68,18 @@ def main():
         debug_mode = st.checkbox(
             "Debug Mode", value=False,
             help="Show DataFrame dtypes, sample values, and full error tracebacks")
+
+        # Diagnostic footer. Confirms which Streamlit build is actually running (theme
+        # options vary by version) and where object names came from - config_view means
+        # the shared config in TRANSCRIPTION_DEPLOY.PUBLIC was readable, session_context
+        # or fallback means it was not.
+        #
+        # Plain text, no unsafe_allow_html: that argument is not available on every
+        # Streamlit build the warehouse runtime may resolve.
+        st.divider()
+        st.caption(
+            f"streamlit {st.__version__}  ·  config: {sf_config.NAMES.SOURCE} "
+            f"({sf_config.NAMES.CONFIG_REVISION})  ·  {sf_config.NAMES.FQ_SCHEMA}")
 
         st.divider()
         st.subheader("Pipeline Status")

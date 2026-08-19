@@ -41,6 +41,8 @@ def get_snowflake_connection():
 class _Names:
     """Fully-qualified object names, resolved at runtime by init()."""
 
+    SOURCE = 'fallback'          # 'config_view' | 'session_context' | 'fallback'
+    CONFIG_REVISION = 'unknown'
     DB = _FALLBACK_DB
     SCHEMA = _FALLBACK_SCHEMA
     FQ_SCHEMA = f"{_FALLBACK_DB}.{_FALLBACK_SCHEMA}"
@@ -52,24 +54,69 @@ class _Names:
     TASK_NAME = 'TRANSCRIBE_NEW_FILES_TASK_V2'
     FQ_TASK = f"{FQ_SCHEMA}.TRANSCRIBE_NEW_FILES_TASK_V2"
     FQ_GATE_PROC = f"{FQ_SCHEMA}.TRANSCRIBE_IF_NEW_FILES"
+    RUN_STALE_SECS = 600
 
 
 NAMES = _Names()
 
+# The deployment config view. Single source of truth, projected from
+# scripts/00_config.sql on every config load.
+CONFIG_VIEW = 'TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG'
+
 
 def init(session):
-    """Resolve object names from the app's own session context.
+    """Resolve object names, preferring the shared config view.
 
-    Warehouse-runtime Streamlit apps run with owner's rights and "use the database and
-    schema that the app was created in", so this is guaranteed to point at the deployment
-    the app belongs to and cannot drift from scripts/00_config.sql.
+    RESOLUTION ORDER
+      1. TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG - the authoritative projection of
+         scripts/00_config.sql. Using it means the dashboard, the notebook and the SQL
+         scripts all derive names from ONE authored source instead of hardcoding them in
+         three places.
+      2. Session context - the app's own database/schema. Correct for location, but object
+         names within the schema fall back to defaults.
+      3. Hardcoded V2 fallback, so a config outage degrades rather than breaking the app.
 
-    Historical note: every query in this dashboard used to reference TRANSCRIPTION_RESULTS
-    UNQUALIFIED, which worked only by accident of session context - nothing in the code
-    proved it targeted V2 rather than the retired V1 deployment.
+    WHY NOT `EXECUTE IMMEDIATE FROM .../00_config.sql`?
+    Because it cannot work here. Warehouse-runtime Streamlit runs as an owner's-rights
+    stored procedure, and those reject session variables outright:
+
+        090244 (42601): Use of session variable '$PROJECT_DB' is not allowed in
+                        owners rights stored procedure
+
+    The script fails on its first SET. Verified empirically 2026-08-19. Reading the view is
+    the supported way to share config with a Streamlit app.
     """
     if session is None:
         return NAMES
+
+    # --- 1. Config view ---------------------------------------------------------
+    try:
+        row = session.sql(f"""
+            SELECT CONFIG_REVISION, PROJECT_DB, PROJECT_SCHEMA, FQ_SCHEMA,
+                   FQ_RESULTS, FQ_RUN_EVENTS, FQ_RUN_STATUS, FQ_STAGE_AV,
+                   FQ_TASK, FQ_GATE_PROC, PROJECT_TASK_TRANSCRIBE, RUN_STALE_SECS
+            FROM {CONFIG_VIEW}
+        """).collect()[0]
+
+        NAMES.SOURCE = 'config_view'
+        NAMES.CONFIG_REVISION = row['CONFIG_REVISION']
+        NAMES.DB = row['PROJECT_DB']
+        NAMES.SCHEMA = row['PROJECT_SCHEMA']
+        NAMES.FQ_SCHEMA = row['FQ_SCHEMA']
+        NAMES.T_RESULTS = row['FQ_RESULTS']
+        NAMES.T_RUN_EVENTS = row['FQ_RUN_EVENTS']
+        NAMES.V_RUN_STATUS = row['FQ_RUN_STATUS']
+        NAMES.V_SUMMARY = f"{row['FQ_SCHEMA']}.TRANSCRIPTION_SUMMARY"
+        NAMES.STAGE_AV = row['FQ_STAGE_AV']
+        NAMES.TASK_NAME = row['PROJECT_TASK_TRANSCRIBE']
+        NAMES.FQ_TASK = row['FQ_TASK']
+        NAMES.FQ_GATE_PROC = row['FQ_GATE_PROC']
+        NAMES.RUN_STALE_SECS = int(row['RUN_STALE_SECS'])
+        return NAMES
+    except Exception:
+        pass  # fall through to session context
+
+    # --- 2. Session context -----------------------------------------------------
     try:
         db = session.get_current_database().replace('"', '')
         sc = session.get_current_schema().replace('"', '')
@@ -77,6 +124,7 @@ def init(session):
         return NAMES
 
     fq = f"{db}.{sc}"
+    NAMES.SOURCE = 'session_context'
     NAMES.DB = db
     NAMES.SCHEMA = sc
     NAMES.FQ_SCHEMA = fq

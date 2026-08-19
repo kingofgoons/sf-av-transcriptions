@@ -35,13 +35,56 @@ BRAND = {
 
 
 def inject_css():
-    """Inject the dashboard's custom classes.
+    """Inject brand typography and the dashboard's custom card classes.
 
-    Kept minimal on purpose: base colours come from .streamlit/config.toml, so there are
-    no heading or button overrides here. Only structures Streamlit has no equivalent for.
+    WHY HEADINGS ARE STYLED HERE RATHER THAN VIA [theme]:
+    the first branding attempt used ONLY .streamlit/config.toml. It applied correctly but
+    was imperceptible - Streamlit's default light theme is already very close to the brand
+    palette, so nothing visibly changed. Heading colour and the blue underline are what
+    actually make the app read as Snowflake, and they are only reachable through CSS.
+    Newer theme options (headingFont, borderColor, chartCategoricalColors) would help but
+    warehouse runtime resolves an unpinned Streamlit, so relying on them is a risk.
     """
     st.markdown(f"""
 <style>
+    /* ---- Brand typography (per Snowflake brand guidelines) ---------------- */
+    /* H1: page title */
+    h1 {{
+        color: {BRAND['DARK_BLUE']} !important;
+        font-weight: 900 !important;
+        letter-spacing: -0.5px;
+    }}
+    /* H2: section headings - dark blue with a Snowflake Blue rule underneath */
+    h2 {{
+        color: {BRAND['DARK_BLUE']} !important;
+        font-weight: 700 !important;
+        border-bottom: 2px solid {BRAND['SF_BLUE']};
+        padding-bottom: 0.3rem;
+    }}
+    /* H3: subheadings */
+    h3 {{
+        color: {BRAND['MID_BLUE']} !important;
+        font-weight: 700 !important;
+    }}
+    a, a:visited {{ color: {BRAND['MID_BLUE']}; }}
+    a:hover {{ color: {BRAND['SF_BLUE']}; }}
+
+    /* Metric tiles: tinted card with a brand accent bar */
+    div[data-testid="stMetric"] {{
+        background-color: {BRAND['LIGHT_TINT']};
+        border-left: 0.25rem solid {BRAND['SF_BLUE']};
+        border-radius: 0.4rem;
+        padding: 0.75rem 1rem;
+    }}
+    div[data-testid="stMetricLabel"] {{ color: {BRAND['MID_BLUE']}; }}
+
+    /* Active tab picks up the brand accent */
+    button[data-baseweb="tab"][aria-selected="true"] {{
+        color: {BRAND['DARK_BLUE']} !important;
+        font-weight: 700;
+    }}
+
+    /* ---- Dashboard card classes ------------------------------------------- */
     .metric-container {{
         background-color: {BRAND['LIGHT_TINT']};
         padding: 1rem;
@@ -93,6 +136,29 @@ def inject_css():
     }}
 </style>
 """, unsafe_allow_html=True)
+
+
+def brand_header(title, subtitle=None):
+    """Compact branded title row.
+
+    Not the gradient banner from the brand skill - that was declined as too tall for a
+    data-dense dashboard. This is a single row: the snowflake mark and wordmark in
+    Snowflake Blue, the title in Dark Blue, over a brand rule.
+    """
+    sub = (f"<div style='color:{BRAND['TEXT_MUTED']}; font-size:0.9rem; "
+           f"margin-top:0.15rem;'>{subtitle}</div>") if subtitle else ''
+    st.markdown(
+        f"""<div style="border-bottom:3px solid {BRAND['SF_BLUE']};
+                    padding-bottom:0.6rem; margin-bottom:1.2rem;">
+            <span style="color:{BRAND['SF_BLUE']}; font-weight:700; font-size:0.8rem;
+                         letter-spacing:2px; text-transform:uppercase;">
+                &#10052; Snowflake
+            </span>
+            <div style="color:{BRAND['DARK_BLUE']}; font-weight:900; font-size:1.9rem;
+                        letter-spacing:-0.5px; line-height:1.15;">{title}</div>
+            {sub}
+        </div>""",
+        unsafe_allow_html=True)
 
 
 ####################################

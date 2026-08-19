@@ -42,7 +42,7 @@
 --#############################################################################
 
 -- Bump this on every edit. Echoed at load time so a stale staged copy is visible.
-SET CONFIG_REVISION = '2026-08-19b';
+SET CONFIG_REVISION = '2026-08-19c';
 
 -- Core naming - change these to create a parallel deployment
 SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name
@@ -67,6 +67,7 @@ SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh 
 SET PROJECT_RUN_EVENTS_TABLE = 'TRANSCRIPTION_RUN_EVENTS';  -- Append-only progress events -- mirrored in notebook cell 4
 SET PROJECT_RUN_STATUS_VIEW  = 'V_TRANSCRIPTION_RUN_STATUS'; -- Derived current-status view
 SET PROJECT_STREAMLIT        = 'TRANSCRIPTION_DASHBOARD';    -- Streamlit app object
+SET PROJECT_STREAMLIT_TITLE  = 'transcription_dashboard_v3'; -- Display title shown in Snowsight
 SET PROJECT_APP_ROLE         = 'TRANSCRIPTION_APP_ROLE';     -- Least-privilege owner for the Streamlit app
 
 -- Staleness threshold for the status panel. A run whose last heartbeat is older than this is
@@ -124,6 +125,86 @@ SET FQ_RUN_STATUS = $FQ_SCHEMA || '.' || $PROJECT_RUN_STATUS_VIEW;
 SET FQ_STREAMLIT  = $FQ_SCHEMA || '.' || $PROJECT_STREAMLIT;
 SET FQ_ALLOW_ALL_RULE = $FQ_SCHEMA || '.' || $PROJECT_ALLOW_ALL_RULE;
 SET FQ_PYPI_RULE      = $FQ_SCHEMA || '.' || $PROJECT_PYPI_RULE;
+
+--#############################################################################
+-- CONFIG VIEW  (added 2026-08-19c)
+--#############################################################################
+--
+-- WHY THIS EXISTS: session variables set above are usable by SQL scripts, but they are
+-- UNREACHABLE from a Streamlit app. Warehouse-runtime Streamlit runs as an owner's-rights
+-- stored procedure, and owner's-rights contexts reject session variables outright:
+--
+--     090244 (42601): Use of session variable '$PROJECT_DB' is not allowed in
+--                     owners rights stored procedure
+--
+-- So `EXECUTE IMMEDIATE FROM .../00_config.sql` CANNOT work inside the dashboard - it
+-- fails on the very first SET. Verified empirically 2026-08-19.
+--
+-- This view projects the config as plain data, which any context can read: the Streamlit
+-- app, the notebook, an ad-hoc worksheet. That makes this file the single authored source
+-- of truth for BOTH the SQL scripts (via session variables) and the Python consumers
+-- (via this view), instead of object names being hardcoded in three places.
+--
+-- It lives in TRANSCRIPTION_DEPLOY.PUBLIC rather than the project schema on purpose: the
+-- deploy database is shared and is NOT dropped by 999_teardown.sql, so config survives a
+-- project teardown and is available before the project schema exists.
+--
+-- Recreated on every config load, so it can never be stale relative to this file.
+--
+-- Wrapped so that a role lacking CREATE VIEW on the deploy schema still gets its session
+-- variables. Config loading must never fail just because the view could not be refreshed.
+EXECUTE IMMEDIATE $$
+DECLARE
+    view_sql VARCHAR;
+BEGIN
+    view_sql := 'CREATE OR REPLACE VIEW TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG
+    COMMENT = ''Current deployment object names, projected from scripts/00_config.sql. Readable from any context, including owner-rights Streamlit where session variables are forbidden.''
+    AS SELECT
+        ''' || $CONFIG_REVISION           || ''' AS CONFIG_REVISION,
+        ''' || $PROJECT_DB                || ''' AS PROJECT_DB,
+        ''' || $PROJECT_SCHEMA            || ''' AS PROJECT_SCHEMA,
+        ''' || $PROJECT_WH                || ''' AS PROJECT_WH,
+        ''' || $PROJECT_COMPUTE_POOL      || ''' AS PROJECT_COMPUTE_POOL,
+        ''' || $PROJECT_NOTEBOOK          || ''' AS PROJECT_NOTEBOOK,
+        ''' || $PROJECT_STAGE_AV          || ''' AS PROJECT_STAGE_AV,
+        ''' || $PROJECT_STAGE_NB          || ''' AS PROJECT_STAGE_NB,
+        ''' || $PROJECT_RESULTS_TABLE     || ''' AS PROJECT_RESULTS_TABLE,
+        ''' || $PROJECT_RUN_EVENTS_TABLE  || ''' AS PROJECT_RUN_EVENTS_TABLE,
+        ''' || $PROJECT_RUN_STATUS_VIEW   || ''' AS PROJECT_RUN_STATUS_VIEW,
+        ''' || $PROJECT_TASK_TRANSCRIBE   || ''' AS PROJECT_TASK_TRANSCRIBE,
+        ''' || $PROJECT_STREAMLIT         || ''' AS PROJECT_STREAMLIT,
+        ''' || $PROJECT_STREAMLIT_TITLE   || ''' AS PROJECT_STREAMLIT_TITLE,
+        ''' || $PROJECT_APP_ROLE          || ''' AS PROJECT_APP_ROLE,
+        ''' || $SERVICE_ROLE              || ''' AS SERVICE_ROLE,
+        ' || $PROJECT_RUN_STALE_SECS      || '  AS RUN_STALE_SECS,
+        ' || $PROJECT_TASK_TIMEOUT_MS     || '  AS TASK_TIMEOUT_MS,
+        ''' || $FQ_SCHEMA                 || ''' AS FQ_SCHEMA,
+        ''' || $FQ_RESULTS                || ''' AS FQ_RESULTS,
+        ''' || $FQ_RUN_EVENTS             || ''' AS FQ_RUN_EVENTS,
+        ''' || $FQ_RUN_STATUS             || ''' AS FQ_RUN_STATUS,
+        ''' || $FQ_STAGE_AV               || ''' AS FQ_STAGE_AV,
+        ''' || $FQ_TASK                   || ''' AS FQ_TASK,
+        ''' || $FQ_GATE_PROC              || ''' AS FQ_GATE_PROC,
+        CURRENT_TIMESTAMP()                      AS REFRESHED_AT';
+    EXECUTE IMMEDIATE view_sql;
+
+    -- The dashboard reads this view, so its role needs SELECT. Tolerated if the role does
+    -- not yet exist (fresh account, before 02_setup has run).
+    BEGIN
+        EXECUTE IMMEDIATE 'GRANT USAGE ON DATABASE TRANSCRIPTION_DEPLOY TO ROLE ' || $PROJECT_APP_ROLE;
+        EXECUTE IMMEDIATE 'GRANT USAGE ON SCHEMA TRANSCRIPTION_DEPLOY.PUBLIC TO ROLE ' || $PROJECT_APP_ROLE;
+        EXECUTE IMMEDIATE 'GRANT SELECT ON VIEW TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG TO ROLE ' || $PROJECT_APP_ROLE;
+    EXCEPTION
+        WHEN OTHER THEN NULL;   -- app role not created yet; 02_setup will re-run this
+    END;
+
+    RETURN 'V_PROJECT_CONFIG refreshed';
+EXCEPTION
+    WHEN OTHER THEN
+        -- Never let a permissions problem here break config loading for SQL scripts.
+        RETURN 'V_PROJECT_CONFIG NOT refreshed (insufficient privileges) - session variables are still set';
+END;
+$$;
 
 --#############################################################################
 -- LOAD ECHO

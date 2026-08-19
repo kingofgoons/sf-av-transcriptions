@@ -100,7 +100,7 @@ echo ""
 echo "Reading config from ${CONFIG_STAGE}..."
 CONFIG_OUT="$(snow sql --connection "${CONNECTION}" --enable-templating NONE -q "
 EXECUTE IMMEDIATE FROM ${CONFIG_STAGE};
-SELECT \$FQ_SCHEMA || '|' || \$PROJECT_STREAMLIT || '|' || \$PROJECT_APP_ROLE || '|' || \$PROJECT_WH AS CFG;
+SELECT \$FQ_SCHEMA || '|' || \$PROJECT_STREAMLIT || '|' || \$PROJECT_APP_ROLE || '|' || \$PROJECT_WH || '|' || \$PROJECT_STREAMLIT_TITLE AS CFG;
 " --format json)"
 
 CFG="$(printf '%s' "${CONFIG_OUT}" | /usr/bin/python3 -c "
@@ -115,6 +115,7 @@ FQ_SCHEMA="$(cut -d'|' -f1 <<<"${CFG}")"
 APP_NAME="$(cut -d'|' -f2 <<<"${CFG}")"
 APP_ROLE="$(cut -d'|' -f3 <<<"${CFG}")"
 APP_WH="$(cut -d'|' -f4 <<<"${CFG}")"
+APP_TITLE="$(cut -d'|' -f5 <<<"${CFG}")"
 FQ_APP="${FQ_SCHEMA}.${APP_NAME}"
 APP_STAGE="${FQ_SCHEMA}.STREAMLIT_STAGE"
 STAGE_DIR="${APP_NAME}"
@@ -122,6 +123,7 @@ STAGE_DIR="${APP_NAME}"
 MODULE_COUNT=$(find "${APP_DIR}" -maxdepth 1 -name '*.py' | wc -l | tr -d ' ')
 echo "  schema:   ${FQ_SCHEMA}"
 echo "  app:      ${FQ_APP}"
+echo "  title:    ${APP_TITLE}"
 echo "  owner:    ${APP_ROLE}"
 echo "  wh:       ${APP_WH}"
 echo "  modules:  ${MODULE_COUNT} .py files + .streamlit/config.toml"
@@ -167,7 +169,7 @@ CREATE OR REPLACE STREAMLIT ${FQ_APP}
     FROM '@${APP_STAGE}/${STAGE_DIR}'
     MAIN_FILE = '${ENTRYPOINT}'
     QUERY_WAREHOUSE = ${APP_WH}
-    TITLE = 'transcription_dashboard_v2';
+    TITLE = '${APP_TITLE}';
 " >/dev/null
 
 # ---------------------------------------------------------------------------
