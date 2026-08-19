@@ -1,3 +1,20 @@
+# Snowflake CLI project definition.
+#
+# NOT THE AUTHORITATIVE DEPLOY PATH. Use scripts/09_deploy_dashboard.sh instead.
+#
+# WHY: `snow streamlit deploy` creates the app as the CONNECTION's role. The dashboard is
+# deliberately owned by TRANSCRIPTION_APP_ROLE (least privilege) because warehouse-runtime
+# Streamlit apps run with OWNER'S RIGHTS - every viewer executes queries with the owner's
+# privileges. Deploying via this file as ACCOUNTADMIN would silently re-own the app and
+# restore that privilege escalation. `GRANT OWNERSHIP ON STREAMLIT` cannot undo it either;
+# Snowflake rejects it with "Unsupported feature GRANT/REVOKE OWNERSHIP ON STREAMLIT".
+#
+# Passing --role does not help: the CLI unconditionally issues CREATE STAGE IF NOT EXISTS
+# and so demands CREATE STAGE on the schema, which we decline to grant to the app role.
+#
+# This file is kept only so `snow streamlit` subcommands (get-url, list) resolve the app,
+# and to document the app's shape in one place.
+
 definition_version: 2
 
 entities:
@@ -9,7 +26,8 @@ entities:
       name: TRANSCRIPTION_DASHBOARD
     title: transcription_dashboard_v2
     query_warehouse: TRANSCRIPTION_WH_V2
-    main_file: transcription_dashboard.py
+    # Warehouse runtime requires the entrypoint in the ROOT of the source directory.
+    main_file: streamlit/transcription_dashboard.py
     stage: TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.STREAMLIT_STAGE
     artifacts:
-      - transcription_dashboard.py
+      - streamlit/
