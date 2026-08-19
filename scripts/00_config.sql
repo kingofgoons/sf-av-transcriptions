@@ -42,7 +42,7 @@
 --#############################################################################
 
 -- Bump this on every edit. Echoed at load time so a stale staged copy is visible.
-SET CONFIG_REVISION = '2026-08-19a';
+SET CONFIG_REVISION = '2026-08-19b';
 
 -- Core naming - change these to create a parallel deployment
 SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name
@@ -58,6 +58,23 @@ SET PROJECT_RESULTS_TABLE = 'TRANSCRIPTION_RESULTS';  -- Results table -- DON'T 
 SET PROJECT_STREAM = 'AV_STAGE_STREAM_V2';           -- Stream — DEPRECATED, no longer used
 SET PROJECT_TASK_TRANSCRIBE = 'TRANSCRIBE_NEW_FILES_TASK_V2';  -- Transcription task
 SET PROJECT_TASK_REFRESH = 'REFRESH_STAGE_DIRECTORY_TASK_V2';  -- Stage refresh task — DEPRECATED
+
+-- Dashboard / run-progress objects (added 2026-08-19b)
+--
+-- RUN_EVENTS is append-only run instrumentation written by the notebook and read by the
+-- Streamlit status panel. The notebook mirrors this name in its own config cell, so if you
+-- change it here you MUST change it there too — same contract as RESULTS_TABLE above.
+SET PROJECT_RUN_EVENTS_TABLE = 'TRANSCRIPTION_RUN_EVENTS';  -- Append-only progress events -- mirrored in notebook cell 4
+SET PROJECT_RUN_STATUS_VIEW  = 'V_TRANSCRIPTION_RUN_STATUS'; -- Derived current-status view
+SET PROJECT_STREAMLIT        = 'TRANSCRIPTION_DASHBOARD';    -- Streamlit app object
+SET PROJECT_APP_ROLE         = 'TRANSCRIPTION_APP_ROLE';     -- Least-privilege owner for the Streamlit app
+
+-- Staleness threshold for the status panel. A run whose last heartbeat is older than this is
+-- reported STALLED rather than RUNNING. Must exceed the longest legitimate gap between
+-- heartbeats — the dominant gap is one Whisper call plus one Cortex summary. Longest observed
+-- single-file transcription is ~325s (1.7 GB file); 600s leaves headroom. Re-check this if the
+-- Whisper model is upsized, since `large` is roughly 10x slower than `base`.
+SET PROJECT_RUN_STALE_SECS = 600;
 
 -- Service account for av.uploader
 SET SERVICE_ROLE = 'AV_UPLOADER_SERVICE_ROLE';
@@ -102,6 +119,9 @@ SET FQ_STREAM   = $FQ_SCHEMA || '.' || $PROJECT_STREAM;
 SET FQ_TASK     = $FQ_SCHEMA || '.' || $PROJECT_TASK_TRANSCRIBE;
 SET FQ_VIEW     = $FQ_SCHEMA || '.TRANSCRIPTION_SUMMARY';
 SET FQ_GATE_PROC = $FQ_SCHEMA || '.TRANSCRIBE_IF_NEW_FILES';
+SET FQ_RUN_EVENTS = $FQ_SCHEMA || '.' || $PROJECT_RUN_EVENTS_TABLE;
+SET FQ_RUN_STATUS = $FQ_SCHEMA || '.' || $PROJECT_RUN_STATUS_VIEW;
+SET FQ_STREAMLIT  = $FQ_SCHEMA || '.' || $PROJECT_STREAMLIT;
 SET FQ_ALLOW_ALL_RULE = $FQ_SCHEMA || '.' || $PROJECT_ALLOW_ALL_RULE;
 SET FQ_PYPI_RULE      = $FQ_SCHEMA || '.' || $PROJECT_PYPI_RULE;
 

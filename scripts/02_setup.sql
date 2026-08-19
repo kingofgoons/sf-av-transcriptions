@@ -183,6 +183,106 @@ CREATE TABLE IF NOT EXISTS IDENTIFIER($PROJECT_RESULTS_TABLE) (
     PARTICIPANTS_JSON VARIANT          -- Participant metadata (name/email/title/affiliation)
 );
 
+--#############################################################################
+-- RUN PROGRESS INSTRUMENTATION (added 2026-08-19b)
+--#############################################################################
+--
+-- WHY THIS EXISTS: the pipeline previously emitted progress only as print() to the
+-- event table, which lands 3-5 minutes late and is useless for a live UI. This table
+-- is written by the notebook (and, after the port, by transcribe_job.py) and read by
+-- the Streamlit status panel.
+--
+-- APPEND-ONLY BY DESIGN. Appends avoid write contention with a concurrently-reading
+-- UI, cost less than updates, and preserve the history needed to answer "which step
+-- did it die on". Expect ~6 rows per file plus ~8 global rows per run.
+--
+-- STATEFUL: IF NOT EXISTS. Adding a column here does NOT alter an existing
+-- deployment - put schema changes in migration/ as explicit ALTER TABLE.
+CREATE TABLE IF NOT EXISTS IDENTIFIER($PROJECT_RUN_EVENTS_TABLE) (
+    RUN_ID           VARCHAR(64)   NOT NULL,  -- uuid4, generated once per run
+    SEQ              NUMBER        NOT NULL,  -- monotonic within RUN_ID
+    EVENT_TS         TIMESTAMP_LTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    RUN_SOURCE       VARCHAR(32),             -- NOTEBOOK | JOB_SERVICE | MANUAL
+    STATUS           VARCHAR(32),             -- RUNNING | WORK_COMPLETE | SUCCEEDED | FAILED
+    PHASE            VARCHAR(32),             -- STARTUP|DISCOVER|DOWNLOAD|TRANSCRIBE|PERSIST|COMPLETE
+    PHASE_NUM        NUMBER,
+    PHASE_TOTAL      NUMBER,
+    FILE_INDEX       NUMBER,                  -- 1-based position in this run
+    FILE_TOTAL       NUMBER,
+    CURRENT_FILE     VARCHAR(500),
+    FILE_STEP        VARCHAR(32),             -- EXTRACT_AUDIO|TRANSCRIBE|GENERATE_SRT|GENERATE_SUMMARY
+    FILE_STEP_NUM    NUMBER,
+    FILE_STEP_TOTAL  NUMBER,
+    UNITS_DONE       NUMBER,                  -- discrete completed work units
+    UNITS_TOTAL      NUMBER,                  -- 4 global + (files * 4)
+    MESSAGE          VARCHAR(1000),
+    ERROR_MESSAGE    VARCHAR(4000)
+);
+
+-- Derived current-status view. One row per run, latest event wins.
+--
+-- STATUS VOCABULARY, and why it is shaped this way:
+--
+--   RUNNING         in progress
+--   WORK_COMPLETE   transcripts are durable in TRANSCRIPTION_RESULTS
+--   CELLS_COMPLETE  every notebook cell has finished; container teardown begins
+--   FAILED          the run gave up
+--   SUCCEEDED       reserved for an EXTERNAL observer, not emitted by the notebook
+--
+-- The notebook CANNOT report its own clean exit. The snowbook shutdown hang occurs
+-- after the last cell finishes, during interpreter shutdown, so any code in the final
+-- cell also runs on a hung run. CELLS_COMPLETE is therefore the notebook's terminal
+-- state, and distinguishing "container exited" from "container wedged" requires
+-- TASK_HISTORY - which the dashboard cross-checks. Do not add a SUCCEEDED emission to
+-- the notebook: it would be written on hung runs and hide the hang.
+--
+-- WORK_COMPLETE going stale still IS a reliable hang signal, because it means the
+-- container wedged between committing rows and finishing teardown.
+--
+-- STATELESS: CREATE OR REPLACE on purpose. Wrapped in EXECUTE IMMEDIATE $$ ... $$ so
+-- `snow sql -f` does not split the block on semicolons.
+EXECUTE IMMEDIATE $$
+DECLARE
+    view_sql VARCHAR;
+BEGIN
+    view_sql := 'CREATE OR REPLACE VIEW ' || $PROJECT_RUN_STATUS_VIEW || ' AS
+WITH latest AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY RUN_ID ORDER BY SEQ DESC) AS rn
+    FROM ' || $PROJECT_RUN_EVENTS_TABLE || '
+)
+SELECT
+    RUN_ID, RUN_SOURCE, STATUS,
+    PHASE, PHASE_NUM, PHASE_TOTAL,
+    FILE_INDEX, FILE_TOTAL, CURRENT_FILE,
+    FILE_STEP, FILE_STEP_NUM, FILE_STEP_TOTAL,
+    UNITS_DONE, UNITS_TOTAL,
+    CASE WHEN COALESCE(UNITS_TOTAL, 0) > 0
+         THEN ROUND(100.0 * UNITS_DONE / UNITS_TOTAL, 1) END AS PCT_COMPLETE,
+    EVENT_TS AS LAST_HEARTBEAT_AT,
+    DATEDIFF(''second'', EVENT_TS, CURRENT_TIMESTAMP()) AS SECONDS_SINCE_HEARTBEAT,
+    MESSAGE, ERROR_MESSAGE,
+    CASE
+        WHEN STATUS IN (''SUCCEEDED'', ''FAILED'') THEN STATUS
+        WHEN STATUS = ''CELLS_COMPLETE'' THEN ''CELLS_COMPLETE''
+        WHEN STATUS = ''WORK_COMPLETE''
+             AND DATEDIFF(''second'', EVENT_TS, CURRENT_TIMESTAMP()) > ' || $PROJECT_RUN_STALE_SECS || '
+             THEN ''WORK_COMPLETE_NOT_EXITED''
+        WHEN STATUS = ''WORK_COMPLETE'' THEN ''FINISHING''
+        WHEN DATEDIFF(''second'', EVENT_TS, CURRENT_TIMESTAMP()) > ' || $PROJECT_RUN_STALE_SECS || '
+             THEN ''STALLED''
+        ELSE ''RUNNING''
+    END AS DERIVED_STATE,
+    -- TRUE while the run may still be holding a GPU container. The kickoff button uses
+    -- this as its advisory block; the task NO_OVERLAP setting is the real authority.
+    CASE WHEN STATUS IN (''SUCCEEDED'', ''FAILED'', ''CELLS_COMPLETE'') THEN FALSE
+         ELSE TRUE END AS IS_ACTIVE
+FROM latest
+WHERE rn = 1';
+    EXECUTE IMMEDIATE view_sql;
+    RETURN $PROJECT_RUN_STATUS_VIEW || ' view created';
+END;
+$$;
+
 -- Create a view for easy querying (using dynamic SQL to resolve table name).
 -- STATELESS: keeps CREATE OR REPLACE on purpose - it holds no data, and a re-run
 -- SHOULD pick up edits to the view definition.
