@@ -87,7 +87,24 @@ service that exits should release the node without intervention — verify it, s
 failure the notebook path hides.
 
 **The hang is multi-file-only:** 0 of 8 single-file runs hung; **6 of 8** multi-file runs did
-(updated 2026-08-19). Any reproduction must use 3+ files.
+(as measured 2026-08-19). Any reproduction must use 3+ files.
+
+**Rate re-checked 2026-09-24: still live, but do not read the raw ratio as improvement.** In the
+7-day `TASK_HISTORY` window, **1 of 6** runs hung — and it was the **only** run with 4 files. Every
+1-2 file run passed. The file-count correlation holds; recent batches have simply been smaller. The
+6-of-8 figure for 3+ file runs is **not contradicted, only un-remeasured**: seven 3-file runs exist
+since 08-28, but only one (09-17, which passed) falls inside the retention window. Do not size this
+port on "1 in 6".
+
+**The leak hypothesis is now REFUTED by direct measurement, which strengthens the case for this
+port.** A resource ledger deployed 2026-08-19 instrumented the 09-21 hung run at every per-file
+boundary: `fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0` held **constant across all four
+files**, with `created=4 removed=4 unaccounted=0 on_disk=0 OK` — and then the container hung for 23
+minutes. Nothing accumulated. The hang is a **race inside snowbook**, established by measurement
+rather than inferred from a teardown census, so no notebook-side fix exists. Two incidental
+corrections from that data: `os_children` is persistently **1** (an OS child that
+`multiprocessing.active_children()` reports as 0 and cannot see — the blind spot behind the
+original "zero children" claim), and `nondaemon` is **3**, not 2.
 
 **It is intermittent — one clean run proves nothing.** Three 3-file runs on 2026-08-19 went
 hang (10:07) / clean (15:21) / hang (15:52) within six hours. That clean run was nearly read as
@@ -316,9 +333,13 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 - Task `SUCCEEDED` with a real `RETURN_VALUE`, not `FAILED`
 - Task duration approximately equals actual work time (expect roughly 2-4 minutes for an 8-minute recording)
-- **The gap between the last progress event and the task end is under ~15 seconds.** This replaces the old "no multi-hour tail" criterion, which became **unfalsifiable** once `USER_TASK_TIMEOUT_MS = 1800000` was introduced — a hang can no longer exceed 30 minutes, so "no multi-hour tail" is now satisfied by hung runs too and would give false confidence. Baselines measured with the query below (2026-08-19): clean runs closed in **4s and 5s**; the hung 3-file run sat **1,339s**. The separation is three orders of magnitude, so ~15s is a generous threshold rather than a tight one
+- **The gap between the last progress event and the task end is under ~30 seconds.** This replaces the old "no multi-hour tail" criterion, which became **unfalsifiable** once `USER_TASK_TIMEOUT_MS = 1800000` was introduced — a hang can no longer exceed 30 minutes, so "no multi-hour tail" is now satisfied by hung runs too and would give false confidence.
 
-  Note this is the gap from the last *progress event*, not the last *transcript write* — those differ by several seconds because the terminal `CELLS_COMPLETE` event fires after the INSERT. Measuring from the write gives ~11s on a clean run. Use one definition consistently; the query below uses the last event
+  **Threshold raised from 15s to 30s on 2026-09-24, because 15s produced a false positive.** A 2-file run (`d3076f58`, 09-22) closed in **18s** and the task **SUCCEEDED** — not a hang, but the 15s rule flagged it `HUNG`. An acceptance criterion that fails legitimate runs gets ignored, which is worse than one that is slightly loose. The separation is still ~2 orders of magnitude, so 30s discriminates comfortably. **Better still, require `STATE = 'FAILED'` as well as a large tail** — the two signals together have never disagreed.
+
+  Note this is the gap from the last *progress event*, not the last *transcript write* — those differ by several seconds because the terminal `CELLS_COMPLETE` event fires after the INSERT. Measuring from the write gives ~11s on a clean run. Use one definition consistently; the query below uses the last event.
+
+  **Do not compute the tail as `task_duration - event_span`.** That was tried on 2026-09-24 and gives 126-149s for clean runs, because task duration includes container startup (pool resume, image pull, package install). It is not comparable to the numbers here and will make clean runs look wedged.
 - Container exits on its own; no `092848 UNAVAILABLE` and no forced exit involved
 - `TRANSCRIPTION_RESULTS` count increments by exactly 1
 - Second trigger returns `SKIPPED` in seconds and launches no GPU
@@ -332,8 +353,7 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 ```sql
 -- Gap between the last progress event and the task ending.
--- Verified baseline 2026-08-19: clean runs 4s and 5s; hung 3-file run 1,339s.
--- Target after the port: consistently under ~15s on 3+ file runs.
+-- Target after the port: consistently under ~30s on 3+ file runs.
 WITH last_ev AS (
     SELECT RUN_ID, MAX(EVENT_TS) AS LAST_EVENT, MAX(RUN_SOURCE) AS SRC,
            MAX(FILE_TOTAL) AS FILES
@@ -342,7 +362,7 @@ WITH last_ev AS (
 )
 SELECT LEFT(e.RUN_ID, 8) AS RUN, e.SRC, e.FILES, t.STATE, t.ERROR_CODE,
        DATEDIFF('second', e.LAST_EVENT, t.COMPLETED_TIME) AS TAIL_SECS,
-       CASE WHEN DATEDIFF('second', e.LAST_EVENT, t.COMPLETED_TIME) <= 15
+       CASE WHEN DATEDIFF('second', e.LAST_EVENT, t.COMPLETED_TIME) <= 30
             THEN 'clean' ELSE 'HUNG' END AS VERDICT
 FROM last_ev e
 JOIN TABLE(TRANSCRIPTION_DB_V2.INFORMATION_SCHEMA.TASK_HISTORY(
@@ -352,10 +372,24 @@ JOIN TABLE(TRANSCRIPTION_DB_V2.INFORMATION_SCHEMA.TASK_HISTORY(
 ORDER BY e.LAST_EVENT DESC;
 ```
 
-Two caveats on the baseline. It only covers **instrumented** runs (2026-08-19 onward), so the
-pre-port comparison is 3 runs, not the full history — the 10:07 hang predates the emitter and does
-not appear. And `INFORMATION_SCHEMA.TASK_HISTORY` retains 7 days, so capture the pre-port numbers
-**before** starting the port rather than expecting to reconstruct them later.
+### PRE-PORT BASELINE — CAPTURED 2026-09-24, DO NOT RE-DERIVE
+
+`INFORMATION_SCHEMA.TASK_HISTORY` retains **7 days**, so this table is the durable record. The
+hung run below ages out of `TASK_HISTORY` around **2026-09-28**; after that it cannot be
+reconstructed. `TRANSCRIPTION_RUN_EVENTS` persists, but it holds no task state or outcome.
+
+| RUN | FILES | STATE | ERROR | TAIL_SECS | VERDICT |
+|---|---|---|---|---|---|
+| `4cbcba83` | 2 | SUCCEEDED | | **3** | clean |
+| `cdd2538a` | 2 | SUCCEEDED | | **4** | clean |
+| `d3076f58` | 2 | SUCCEEDED | | **18** | clean (flagged by the old 15s rule) |
+| `894c49f1` | 1 | SUCCEEDED | | **3** | clean |
+| `906118df` | **4** | **FAILED** | 000630 | **1279** | **HUNG** |
+| `bc1788c6` | 3 | SUCCEEDED | | **4** | clean |
+
+Clean tails cluster at **3-4s**, consistent with the 4s/5s measured on 2026-08-19. The hung
+tail of **1,279s** is consistent with the 1,339s measured then. **Post-port target: every 3+
+file run under 30s.**
 
 ## Critical files
 
