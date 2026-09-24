@@ -1,0 +1,23 @@
+{
+  "eligibility_at_extract": {
+    "BACKFILL_CANDIDATES": 250,
+    "BACKFILL_FILENAME": 220,
+    "ELIGIBLE_FILENAME": 273,
+    "ELIGIBLE_SRT": 493,
+    "ELIGIBLE_SUMMARY": 240,
+    "IN_ERA_FILENAME": 163,
+    "IN_ERA_SRT": 377,
+    "IN_ERA_SUMMARY": 55,
+    "ROWS_TOTAL": 493
+  },
+  "era_cutoffs": {
+    "filtered_on": "TRANSCRIPTION_TIMESTAMP (processing date, NOT the meeting date in FILE_NAME - those differ by weeks)",
+    "srt_and_filename_from": "2026-02-01",
+    "summary_from": "2026-08-18",
+    "why": "The SRT generator stopped skipping empty-text segments between 2026-01 and 2026-02 (80 of 116 rows differ before, 0 of 377 after). The summary prompt emitted \"## Key Topics\" markdown headings from 2026-02-10 to 2026-08-17, which parse_summary_sections cannot match because it compares bare headers by exact string equality; the 2026-08-18 commit that added the missing `import re` also reverted the prompt. Rows outside these windows were produced by different code, so a mismatch against them is historical drift, not a port bug - including them made 6 SRT rows and 72 summary rows fail."
+  },
+  "note": "Known-good rows only, and current-code-era rows only. Rows with NULL parsed fields are excluded deliberately: they are victims of the missing `import re` (fixed 2026-08-18), not evidence that NULL is the correct output. The SRT cohort is a stratified sample by segment count and stores expected output as hashes, because a full dump is 49 MB.",
+  "source_table": "TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIPTION_RESULTS",
+  "srt_expected_as": "sha256 of SRT_CONTENT and SRT_WITH_SPEAKERS",
+  "srt_sample_size": 20
+}
