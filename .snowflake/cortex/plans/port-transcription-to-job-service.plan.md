@@ -155,13 +155,13 @@ The session runs as the **service owner role**. The token file is refreshed ever
 
 ### Notebook inventory
 
-\~**1,671** lines of code across 19 code cells (grew from \~1,312 when progress instrumentation was added on 2026-08-19). Realistic target is **650-750 lines** of headless Python, plus the progress emitter. The work concentrates in a few places:
+**Re-measured 2026-09-24: 1,814 lines of code across 19 code cells** (36 cells total). Grew from \~1,312 before the 2026-08-19 progress instrumentation and \~1,671 at the last measurement; the resource ledger added the most recent \~150. Realistic target is **650-750 lines** of headless Python, plus the progress emitter. The work concentrates in a few places:
 
-- Cell 19 (`helper_functions`) is pure functions with no notebook coupling and ports nearly verbatim. It contains the load-bearing `import re`. It was 462 lines when this plan was written and has since gained progress emissions — re-measure before estimating.
-- Cell 5 session bootstrap must be rewritten (OAuth instead of `get_active_session`, drop `session.use_role("SYSADMIN")`, drop the unused `Root(session)`).
+- **Cell 19 (`helper_functions`) is 526 lines** — the largest cell and the bulk of the port. Pure functions with no notebook coupling; ports nearly verbatim. Contains the load-bearing `import re`. **8 of its functions were already extracted on 2026-09-24** into `scripts/payload/transcribe_functions.py`, AST-verified identical, and are now covered by 122 offline tests — see the prerequisite note on task 4. Reuse that module rather than re-extracting.
+- **Cell 5 session bootstrap is 260 lines** and must be rewritten (OAuth instead of `get_active_session`, drop `session.use_role("SYSADMIN")`, drop the unused `Root(session)`). It also now holds `RunProgress` (task 4b) and the resource ledger (task 4c).
 - Cells 26, 30, 31, 32, 35 and cell 10 are presentation-only and get dropped, including the entire teardown apparatus.
 - Cell 12 is a duplicate `openai-whisper` install and gets dropped.
-- Cell 28's `except` branch is **dead and broken** — it supplies 14 positional values against a 23-column table. Do not port it; replace with a real error path.
+- **Cell 28 is 154 lines.** Its `except` branch is **dead and broken** — it supplies 14 positional values against a 23-column table. Do not port it; replace with a real error path.
 - `media_files/` is a relative path dependent on cwd; use an absolute temp dir.
 
 Only `openai-whisper` and `pandas` need installing; `torch` comes from the image.
@@ -240,7 +240,39 @@ The Cortex model is **`claude-sonnet-4-6`**, verified against notebook line 1007
 
 ### 4. Validate the payload locally against a clone
 
-Before any Snowflake wiring:
+**PREREQUISITE — already satisfied as of 2026-09-24, do not redo.** The offline test harness from
+`port-test-harness-and-metadata-backfill.plan.md` tasks 1-4 is complete and committed (`2760f71`):
+
+- `scripts/payload/transcribe_functions.py` holds 8 functions extracted from cell 19,
+  AST-verified byte-identical apart from one documented change (`generate_summary_markdown` takes
+  `session` as an explicit first parameter instead of reading the global).
+- `tests/test_payload_functions.py` — 41 unit tests.
+- `tests/test_payload_parity.py` — parity against **239 rows of stored history**, regenerating
+  outputs from stored inputs and comparing to the stored values. Fixtures in
+  `tests/fixtures/golden/` (936 KB).
+- **122 tests, all passing, fully offline and free.** Verified non-vacuous by mutation testing.
+
+**This changes the shape of task 4.** The original step below was the port's only correctness
+check, and it validated a 1,800-to-700 line rewrite by diffing a single row by hand. That is now
+the *last* line of defence rather than the only one. Run the offline suite first — it is instant
+and catches whole classes of port bug before any GPU is provisioned:
+
+```bash
+pytest tests/ -q      # must be green BEFORE requesting a compute pool
+```
+
+Two real bugs were already caught this way, both of which would have shipped silently because the
+notebook swallows them in a bare `except`: writing `import datetime` instead of `from datetime
+import datetime` (nulls `CALL_START_TS` for every file) and the missing `import re` (nulls all six
+summary fields, which is what caused the 181-row metadata gap from 2026-04 to 2026-07).
+
+**Corpus scoping matters if you re-extract.** Parity rows are filtered to the current code era by
+`TRANSCRIPTION_TIMESTAMP`, because the SRT generator changed between 2026-01 and 2026-02 and the
+summary prompt's header format changed between 2026-02-10 and 2026-08-17. Unscoped, the suite
+reports 78 failures that are pure historical drift. Never filter on the date in `FILE_NAME` — that
+is the meeting date, not the processing date.
+
+Then the clone check, unchanged in intent:
 
 - `CREATE TABLE TRANSCRIPTION_RESULTS_PORTTEST CLONE TRANSCRIPTION_RESULTS` (zero-copy, free)
 - Run the payload locally with `--results-table TRANSCRIPTION_RESULTS_PORTTEST` against the DoubleVerify file
@@ -286,7 +318,50 @@ SQL INSERTs, no notebook APIs, `emit()` never raises), so this is close to a cop
 Validate on the clone run in task 4: the event stream should reach exactly `UNITS_DONE ==
 UNITS_TOTAL` and `PCT_COMPLETE = 100.0`, with all four per-file steps present for every file.
 
+### 4c. Port the resource ledger — DECISION: yes, port it
+
+**Decided 2026-09-24.** The ledger is \~150 lines in cell 5 plus call sites in cell 19 and cell 34.
+It counts things that must be cleaned up and re-counts them after cleanup, printing a paired
+`created=N removed=N unaccounted=0 on_disk=0` verdict, alongside a snapshot of fd count, thread
+count, non-daemon thread count, direct OS children and leftover temp WAVs at every per-file
+boundary.
+
+**Why port it rather than drop it as hang-investigation scaffolding:**
+
+1. **It is what made the hang diagnosis sound.** The original investigation concluded "zero child
+   processes" from `multiprocessing.active_children()`, which structurally **cannot see**
+   `subprocess.Popen` children — and ffmpeg is a `Popen` child. The ledger reads
+   `/proc/<pid>/task/*/children` and showed `os_children=1` persistently. The earlier claim was
+   false. Dropping the instrumentation re-opens the door to the same false negative.
+2. **It converts the port's central claim into a measurement.** The port's premise is that nothing
+   leaks and the hang is a race inside `snowbook`. After the port, the ledger is how you confirm
+   the *payload* is clean rather than assuming it. If a job-service run ever wedges, the first
+   question is again "did we leak something", and the answer should be data.
+3. **It has already paid for itself and costs nothing.** Five runs (09-21 ×2, 09-22, 09-23, 09-24)
+   all report `unaccounted=0 on_disk=0 OK`. Output goes to stdout, not to
+   `TRANSCRIPTION_RUN_EVENTS`, so there are no extra INSERTs and no schema impact. `/proc` is
+   readable in the container, confirmed by the `fd=` and `os_children=` values being real numbers.
+
+**Porting notes:**
+
+- Keep `_os_children()` returning **`None`, not `[]`**, when `/proc` is unavailable. An empty list
+  is indistinguishable from genuinely-zero children, which is precisely the false negative above.
+  The snapshot prints `-1` for the unmeasurable case.
+- In a headless script, stdout goes to the service's container log rather than to notebook cell
+  output. Confirm the verdict line is actually retrievable via `SYSTEM$GET_SERVICE_LOGS` (or the
+  event table, if the spec routes logs there) before relying on it — otherwise the ledger runs and
+  reports into the void.
+- Call `ledger_reconcile()` **before** removing the work directory. In the notebook it sits ahead
+  of `shutil.rmtree('media_files')` deliberately: afterwards `on_disk` is always 0 and the check is
+  vacuous.
+- The per-file `finally` block owns the `wav_removed` increment. Keep it in `finally`, not on the
+  success path, or a failed file undercounts removals and reports a phantom leak.
+- A headless script can also emit a **final** post-cleanup snapshot, which the notebook cannot
+  (its hang is after the last cell). Add one immediately before exit.
+
 ### 5. Wire the launch path
+
+
 
 - Add to scripts/00\_config.sql (the single source of truth): `PROJECT_JOB_IMAGE`, `PROJECT_JOB_NAME`, `PROJECT_STAGE_PAYLOAD`, plus derived `FQ_*`. Bump `CONFIG_REVISION` and republish with scripts/publish\_config.sh. **Also extend the `V_PROJECT_CONFIG` emitter at the bottom of that file** with the new names — it did not exist when this plan was written and is now how the dashboard resolves object names without drift.
 - Reuse `NOTEBOOK_STAGE` for the payload or add a dedicated payload stage; either way pin the name in config, not inline.
@@ -301,6 +376,61 @@ Upload a real recording through `upload_av_files.py` and confirm the full chain.
 ### 7. Decommission and document
 
 Retire the headless notebook path while keeping the notebook for interactive use. The notebook and the payload will share logic by copy, not by import — accept that duplication explicitly, or note the follow-up to have the notebook import the payload module from the stage.
+
+**Do not delete the `EXECUTE NOTEBOOK` path in this step.** See the rollback section below; it is
+retired only after the port has earned it.
+
+## Rollback
+
+The port replaces the only working transcription path with an unproven one, against a hang that is
+**intermittent** — 1 of 6 runs in the current 7-day window, and it has previously produced a
+hang/clean/hang sequence inside six hours. So a single clean run is not evidence the port worked,
+and by symmetry a single failure is not evidence it is broken. That asymmetry is the whole reason
+rollback needs to be cheap and pre-decided rather than improvised.
+
+**Keep both launch paths live, selected by config.** Add to `scripts/00_config.sql.template`:
+
+```sql
+-- NOTEBOOK | JOB_SERVICE. Selects how TRANSCRIBE_IF_NEW_FILES() launches the work.
+-- Keep NOTEBOOK reachable until the job service has 4 consecutive clean 3+ file runs.
+SET PROJECT_LAUNCH_MODE = 'JOB_SERVICE';
+```
+
+Surface it through `V_PROJECT_CONFIG` like every other name, and have the stored procedure branch
+on it. Rollback is then a config republish plus a procedure recreate — no code revert, no
+redeploy, no scramble to reconstruct a deleted path while the pipeline is down.
+
+**Rollback triggers** — any one is sufficient:
+
+- 2 hung job-service runs (tail > 30s with `STATE = 'FAILED'`) within any 10 runs.
+- A row written to `TRANSCRIPTION_RESULTS` that fails the 23-column diff against notebook output,
+  or any NULL in `MEETING_TITLE`/`CALL_BRIEF`/`KEY_POINTS`/`NEXT_STEPS` on a file that previously
+  produced them.
+- `TRANSCRIPTION_RESULTS` count decreasing at any point.
+- The dashboard Pipeline Status panel showing `IDLE` during a live run for more than one run
+  (instrumentation not ported correctly).
+- Compute pool showing phantom long-lived jobs, i.e. the job service has its own exit problem.
+
+**Rollback procedure:**
+
+1. `snow sql` the config flip to `'NOTEBOOK'`, republish via `scripts/publish_config.sh`, recreate
+   the procedure. Verify with `SELECT * FROM V_PROJECT_CONFIG` before triggering anything.
+2. Confirm the next run launches the notebook and completes.
+3. Leave `USER_TASK_TIMEOUT_MS = 1800000` in place regardless of mode — it is the backstop for
+   *either* path wedging, and it is what converts an unbounded hang into a bounded failure.
+4. Record the failing run's `RUN_ID`, the three duration budgets and the ledger verdict before
+   re-running anything. A rollback that discards the evidence guarantees a second attempt with no
+   more information than the first.
+
+**Retire `NOTEBOOK` mode only after** 4 consecutive clean 3+ file job-service runs, per the honest
+success criterion below. At that point delete the branch, the config value, and the notebook's
+headless entry point in one commit.
+
+**Data safety.** Take a zero-copy clone of `TRANSCRIPTION_RESULTS` before the first write from the
+job service, matching the existing `TR_BACKUP_GOOD` pattern. It is free and it is the only thing
+standing between an unnoticed payload bug and 493 transcripts of irreplaceable history. Note the
+port is additive to the table — no schema change — so rollback never requires a data migration,
+only that no bad rows were written.
 
 ## Verification
 
@@ -332,7 +462,20 @@ Retire the headless notebook path while keeping the notebook for interactive use
 **End-to-end (task 6):**
 
 - Task `SUCCEEDED` with a real `RETURN_VALUE`, not `FAILED`
-- Task duration approximately equals actual work time (expect roughly 2-4 minutes for an 8-minute recording)
+- **Task duration splits into two budgets, measured separately.** The old single "2-4 minutes for an
+  8-minute recording" criterion conflated them and is not checkable: container startup is a large,
+  variable fraction of wall time, so a slow image pull looks identical to slow transcription.
+
+  | Budget | What it covers | Expectation |
+  |---|---|---|
+  | **Startup** | task start → first progress event: pool resume, image pull, `pip install`, model load | Notebook baseline is **60-180s**. A job service on a pre-baked image should be **faster**; if deps ship in the image, seconds. |
+  | **Work** | first progress event → last progress event | Roughly **2-4 minutes** per 8-minute recording. This is GPU-bound and the port should not change it materially. |
+  | **Tail** | last progress event → task end | **Under ~30s.** This is the hang criterion. |
+
+  Startup + work + tail should account for essentially all of task duration. If they do not, there
+  is unmeasured time and the measurement is wrong — which is exactly the trap described below.
+  Record all three per run, not just the total; a regression in startup and a regression in work
+  need different fixes.
 - **The gap between the last progress event and the task end is under ~30 seconds.** This replaces the old "no multi-hour tail" criterion, which became **unfalsifiable** once `USER_TASK_TIMEOUT_MS = 1800000` was introduced — a hang can no longer exceed 30 minutes, so "no multi-hour tail" is now satisfied by hung runs too and would give false confidence.
 
   **Threshold raised from 15s to 30s on 2026-09-24, because 15s produced a false positive.** A 2-file run (`d3076f58`, 09-22) closed in **18s** and the task **SUCCEEDED** — not a hang, but the 15s rule flagged it `HUNG`. An acceptance criterion that fails legitimate runs gets ignored, which is worse than one that is slightly loose. The separation is still ~2 orders of magnitude, so 30s discriminates comfortably. **Better still, require `STATE = 'FAILED'` as well as a large tail** — the two signals together have never disagreed.
@@ -347,7 +490,21 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 **Regression guard:** confirm `TRANSCRIPTION_RESULTS` never drops below its pre-change count at any point. Take a zero-copy clone as a backup before the first write to the real table, matching the `TR_BACKUP_GOOD` pattern already in use.
 
-**Honest success criterion:** the hang is multi-file-specific — **6 of 8** multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only when **each** run closes its last-event-to-task-end gap in under ~15s (not merely "under 30 minutes", which the task timeout guarantees regardless). Given the observed hang/clean/hang sequence within six hours on 2026-08-19, "several" means **at least 4 consecutive clean multi-file runs**, not one or two. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then — it is also the backstop if the job service turns out to have an exit problem of its own.
+**Honest success criterion:** the hang is multi-file-specific — **6 of 8** multi-file runs hung, 0 of 8 single-file runs did. A single-file job therefore proves **nothing** about the hang; it sits in the regime that never failed. Validate with **3+ file** runs, and treat the hang as resolved only when **each** run closes its last-event-to-task-end gap in under **~30s with `STATE` not `FAILED`** (not merely "under 30 minutes", which the task timeout guarantees regardless). Given the observed hang/clean/hang sequence within six hours on 2026-08-19, "several" means **at least 4 consecutive clean multi-file runs**, not one or two. Keep the `USER_TASK_TIMEOUT_MS` cap in place until then — it is also the backstop if the job service turns out to have an exit problem of its own.
+
+**Threshold reconciled 2026-09-24.** This paragraph said `~15s` while the criterion above says `~30s`;
+30s is correct and 15s produced a documented false positive on a SUCCEEDED 18s run. Use 30s, and
+prefer the two-signal form (large tail **and** `STATE = 'FAILED'`), which has never disagreed.
+
+**The `6 of 8` figure is stale and has not been re-measured.** It dates from 2026-08-19. The current
+7-day window shows **1 hang in 6 runs**, and that hang was the window's *only* 4-file run — every
+1-2 file run passed. So the multi-file-specificity still holds as far as the data goes, but the
+*rate* is unquantified: there is no recent multi-file sample large enough to estimate it. This
+matters for the acceptance bar. If multi-file runs hang at, say, 1 in 4, then 4 consecutive clean
+runs is roughly a 1-in-3 chance of passing by luck. Either re-measure the base rate with several
+pre-port multi-file runs, or treat 4 clean runs as necessary-but-not-sufficient and keep the
+`NOTEBOOK` rollback path available longer than the criterion strictly requires.
+
 
 **Measurement query** — use this rather than eyeballing durations, before and after the port. Verified working 2026-08-19:
 

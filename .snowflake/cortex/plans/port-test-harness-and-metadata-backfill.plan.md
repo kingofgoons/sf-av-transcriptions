@@ -96,22 +96,72 @@ My recommendation: **port verbatim, prove parity, then improve the parser as a s
 
 ## Work
 
-### 1. Offline unit tests for the pure functions
+**Status 2026-09-24: items 1, 2 and 4 are complete and committed (`2760f71`). Item 3 (backfill) is
+not started.** 122 tests pass, offline and free.
+
+### 1. Offline unit tests for the pure functions — DONE
 
 `tests/test_payload_functions.py`, mirroring the structure of `tests/test_config.py`. Import the ported functions directly; no Snowflake, no GPU. Prioritise by risk from the table above: `parse_summary_sections` first (14 branches), then `generate_summary_markdown`.
 
 Cover explicitly: empty and None input, missing sections, sections in unexpected order, a summary with no recognised markers at all, `format_timestamp_srt` at 0 / sub-second / hour boundaries / non-integer seconds, and SRT numbering starting at 1.
 
-### 2. Golden-corpus parity harness
+### 2. Golden-corpus parity harness — DONE, with one deliberate deviation
 
 `tests/test_payload_parity.py`, plus a one-off extract script that pulls the corpus to `tests/fixtures/golden/` as newline-delimited JSON so the tests stay offline and run in CI without a connection.
 
-- **SRT regeneration, 493 rows.** Feed stored `TRANSCRIPT_WITH_SPEAKERS` through the ported generators and assert byte-equality with stored `SRT_CONTENT` and `SRT_WITH_SPEAKERS`. This transitively validates `format_timestamp_srt`, where an off-by-one in millisecond formatting would otherwise ship broken subtitles invisibly.
-- **Parser reproduction, 240 known-good rows only.** Assert every field matches.
-- **Filename reproduction, 270 rows.** Assert `ACCOUNT_NAME`, `CALL_START_TS`, `PARTICIPANTS_JSON` match.
-- **Record any mismatches as accepted-diff fixtures with a written reason.** Do not loosen an assertion to make a suite green.
+**Delivered cohorts differ from the estimates below, and the reason matters more than the numbers.**
 
-### 3. Metadata backfill (deliverable in its own right)
+| | Planned | Delivered | Why |
+|---|---|---|---|
+| SRT | 493 rows | **21 sampled from 377 in-era** | 493 rows of full text is 49 MB. Stratified NTILE sample spanning 33-2869 segments plus the corpus max; expected output stored as SHA-256. Fixtures total 936 KB. |
+| Summary | 240 rows | **55** | Era-scoped, see below. |
+| Filename | 270 rows | **163** | Era-scoped, see below. |
+
+**DEVIATION from "record any mismatches as accepted-diff fixtures".** The first run produced 78
+failures: 6 SRT rows and 72 summary rows. I did **not** record them as accepted diffs, and I did not
+loosen any assertion. I **narrowed the corpus** instead, which needs justifying because narrowing a
+corpus is otherwise an excellent way to hide real failures.
+
+The justification is that those rows were written by **different code**, so they were never evidence
+about this port:
+
+- The SRT generator stopped skipping empty-text segments between 2026-01 and 2026-02. Proven by
+  comparing `REGEXP_COUNT(SRT_CONTENT,' --> ')` to `ARRAY_SIZE(...:speakers)` per processing month:
+  80 of 116 rows differ before the boundary, **0 of 377 after**. For each failing row the segment
+  delta equalled its count of empty-text segments exactly (+1, +4, +5, +6).
+- The summary prompt emitted `## Key Topics` markdown headings from **2026-02-10 18:10 to
+  2026-08-17 17:03**, which `parse_summary_sections` cannot match because it compares bare headers
+  by exact string equality. The 2026-08-18 commit that added the missing `import re` also reverted
+  the prompt — one change, both effects, which is why the two dates are a day apart.
+
+An accepted-diff fixture would have recorded "these 78 rows differ" as a permanent expectation,
+which is worse: it would keep dead-era rows in the suite forever and normalise 78 known diffs, so a
+real 79th would not stand out. Excluding them and **asserting the exclusion held** is stronger.
+Two tests do that — `test_srt_cohort_is_era_consistent` and
+`test_summary_corpus_contains_no_off_era_rows` — so an extractor regression fails at the cause
+instead of as hundreds of downstream mismatches.
+
+**Guard against the obvious abuse:** the suite was mutation-tested to prove it is not vacuous.
+Rounding milliseconds instead of truncating fails 43 tests; changing one summary header literal
+fails 4; `import datetime` in place of `from datetime import datetime` fails 5.
+
+**One finding worth carrying forward.** `generate_summary_markdown` stores a *wrapper* document as
+`SUMMARY_MARKDOWN` but calls the parser on the *inner* LLM text. Feeding the stored value back in
+sweeps the 40-character footer into the last section, which mismatched `QUESTIONS_RAISED` on 240 of
+240 rows before `inner_summary()` was written to recover the parser's true input. Anything else that
+re-parses `SUMMARY_MARKDOWN` — **including the backfill in item 3** — has to do the same unwrapping
+or it will silently corrupt the last section.
+
+**Also corrected:** filtering must be on `TRANSCRIPTION_TIMESTAMP` (processing date), never on the
+date in `FILE_NAME` (meeting date). They differ by weeks, and grouping by filename date makes the
+eras appear interleaved and hides both boundaries completely.
+
+- ~~**SRT regeneration, 493 rows.**~~ Superseded by the table above; hash-compared, not byte-compared, for size.
+- ~~**Parser reproduction, 240 known-good rows only.**~~ Superseded: 55 in-era rows, every field exact.
+- ~~**Filename reproduction, 270 rows.**~~ Superseded: 163 in-era rows. `ACCOUNT_NAME` and `CALL_START_TS` asserted; `PARTICIPANTS_JSON` extracted but not yet compared.
+- **Record any mismatches as accepted-diff fixtures with a written reason.** Do not loosen an assertion to make a suite green. — Honoured in spirit; see the deviation note above.
+
+### 3. Metadata backfill (deliverable in its own right) — NOT STARTED
 
 A script that re-derives the parsed fields from stored `SUMMARY_MARKDOWN` and `FILE_NAME` and `UPDATE`s only NULL columns. Never touches `TRANSCRIPT`, `SRT_*`, or `SUMMARY_MARKDOWN`.
 
@@ -119,13 +169,54 @@ Dry-run first, reporting rows affected per column. Take a zero-copy clone before
 
 Run it with the **ported** functions, so it doubles as the port's correctness evidence.
 
-### 4. Amendments to the port plan
+**Two constraints discovered while building item 2 — both will silently corrupt this backfill if
+missed:**
 
-- Add tasks 1-3 above as prerequisites to its task 4.
-- Replace "expect roughly 2-4 minutes" with separate budgets for container startup and work, since startup is 126-149s on the notebook path and unknown on the job path. Have the task 1 spike measure job-service startup explicitly.
-- Add a **rollback section**: keep `EXECUTE NOTEBOOK` reachable behind a config flag until the 4 consecutive clean multi-file runs are banked; document the exact revert (restore the gate procedure body, republish config) and verify it once on purpose rather than discovering it under pressure.
-- Update stale inventory: the notebook is now **1,814** code lines (plan says \~1,671), cell 19 is **526** (plan says 462), cell 5 is **260** having grown with the resource ledger. Re-derive the \~700-line target.
-- Decide whether the payload carries the **resource ledger**. It is cheap, and a `RECONCILE ... OK` plus a flat per-file curve from a job-service run would directly demonstrate the clean exit the port exists to achieve. My recommendation: yes, port it.
+1. **Unwrap before parsing.** `SUMMARY_MARKDOWN` is a wrapper document; the parser expects the
+   inner LLM text. Reuse `inner_summary()` from `tests/test_payload_parity.py` (or move it into the
+   payload module) rather than passing the stored column directly, or the trailing
+   `*Generated by Snowflake Cortex AI*` footer lands inside `QUESTIONS_RAISED` on every row.
+2. **The `##`-header era is not backfillable with the current parser.** Rows processed between
+   2026-02-10 and 2026-08-17 use `## Key Topics`-style headings that `parse_summary_sections`
+   cannot match, so re-running it over them yields NULL for all five section fields and the row is
+   simply skipped. Two options, and the dry-run should quantify both before anyone chooses:
+   either teach the parser to accept `##`-prefixed headers as well (a small, safe widening — but
+   it changes behaviour, so it needs its own before/after evidence and a fixture re-extract), or
+   accept that those rows stay NULL. Do not discover this after the clone is taken; the dry-run
+   must report recoverable-vs-unrecoverable split by era, not a single total.
+
+   Note the previously-estimated "125 of 250 title-less rows are backfillable" figure counted rows
+   containing a parseable `# Meeting Summary:` line. The **title** is regex-matched and therefore
+   era-insensitive, so that estimate should still hold for `MEETING_TITLE`. The five **section**
+   fields are a different population. Report them separately.
+
+### 4. Amendments to the port plan — DONE
+
+All five applied to `port-transcription-to-job-service.plan.md`:
+
+- ~~Add tasks 1-3 above as prerequisites to its task 4.~~ **Done** — task 4 now opens with the
+  satisfied-prerequisite note and a `pytest tests/ -q` gate that must be green before a compute
+  pool is requested.
+- ~~Replace "expect roughly 2-4 minutes" with separate budgets.~~ **Done** — replaced with a
+  three-budget table (startup / work / tail) that must account for essentially all of task
+  duration, plus the instruction to record all three per run. The 126-149s figure is startup-ish
+  overhead, which is why conflating it with the tail was so misleading.
+- ~~Add a rollback section.~~ **Done** — new `## Rollback` section: `PROJECT_LAUNCH_MODE` config
+  flag, five explicit rollback triggers, a four-step procedure, an evidence-preservation step, and
+  the condition for finally retiring `NOTEBOOK` mode. Task 7 amended not to delete the notebook
+  path prematurely.
+- ~~Update stale inventory.~~ **Done** — 1,814 lines, cell 19 = 526, cell 5 = 260, cell 28 = 154,
+  with a pointer to the already-extracted `transcribe_functions.py`.
+- ~~Decide whether the payload carries the resource ledger.~~ **Done** — new task 4c, decision
+  **yes**, with the three reasons and five porting notes (chiefly: keep `_os_children()` returning
+  `None` rather than `[]`, and verify stdout is actually retrievable from a container log).
+
+**One unplanned amendment, found while editing.** The plan contained a self-contradiction: the
+acceptance criterion said a tail under `~30s` while the "honest success criterion" paragraph still
+said `~15s`. Reconciled to 30s. Separately, flagged that the **`6 of 8` hang rate is stale** — it
+dates from 2026-08-19, and the current 7-day window shows 1 hang in 6 runs, that hang being the
+window's only 4-file run. Multi-file specificity still holds; the *rate* is unquantified, which
+weakens "4 consecutive clean runs" as a bar. Noted with the arithmetic.
 
 ## Verification
 
