@@ -1,8 +1,16 @@
 --#############################################################################
--- 00_config.sql — THE SINGLE SOURCE OF TRUTH for deployment object names
+-- 00_config.sql.template — TEMPLATE for deployment object names
 --#############################################################################
 --
--- THIS IS THE ONLY FILE THAT SHOULD CONTAIN `SET PROJECT_...` STATEMENTS.
+-- THIS IS A TEMPLATE. DO NOT EDIT IT TO CONFIGURE YOUR DEPLOYMENT.
+--
+-- Your working copy is scripts/00_config.sql, which is GITIGNORED so each
+-- installation can point at its own objects without committing local values or
+-- generating merge conflicts on a shared file. Same pattern this project already
+-- uses for av.uploader/config.template.json -> av.uploader/config.json.
+--
+-- THE WORKING COPY IS THE ONLY FILE THAT SHOULD CONTAIN `SET PROJECT_...`
+-- STATEMENTS.
 --
 -- Every other script loads these values with one line:
 --
@@ -13,15 +21,23 @@
 -- and no stored procedure involved.
 --
 -- ----------------------------------------------------------------------------
--- HOW TO CHANGE CONFIG
+-- HOW TO CONFIGURE A DEPLOYMENT
 -- ----------------------------------------------------------------------------
---   1. Edit the values below.
---   2. Bump CONFIG_REVISION.
---   3. Run ./publish_config.sh
+--   1. ./init_config.sh        creates scripts/00_config.sql from this template
+--   2. Edit scripts/00_config.sql   <- your copy, NOT this template
+--   3. ./publish_config.sh      validates, stamps a revision, stages it
 --
---   Step 3 is REQUIRED. Scripts read the STAGED copy, not this local file. If you
---   skip it, every script silently keeps using the previous values. The revision
---   stamp echoed at the bottom is how you detect that.
+--   Step 3 is REQUIRED. Scripts read the STAGED copy, not your local file. If you
+--   skip it, every script silently keeps using the previous values.
+--
+--   Step 3 is also what catches DRIFT: if this template later gains a variable
+--   your working copy does not have, publish_config.sh fails and names the
+--   missing key, rather than letting a script fail later on an unset variable.
+--
+--   You no longer hand-maintain CONFIG_REVISION. publish_config.sh derives it
+--   from a hash of your SET values, so it cannot be forgotten, and
+--   04_deploy_notebook.sh / 09_deploy_dashboard.sh compare it against your local
+--   file to REFUSE to deploy against a stale staged copy.
 --
 -- ----------------------------------------------------------------------------
 -- WHY THIS EXISTS
@@ -35,14 +51,28 @@
 -- ----------------------------------------------------------------------------
 -- PARALLEL DEPLOYMENTS
 -- ----------------------------------------------------------------------------
---   To run a second deployment (dev/staging), copy this file to a new name on the
---   stage (e.g. 00_config_dev.sql) with different values, and point the include at
---   that file. Do NOT maintain two copies of the values in different scripts.
+--   Keep a SECOND working copy with different values, publish it under its own
+--   name on the stage, and point the consumers at it using the override each one
+--   already supports:
+--
+--       CONFIG_STAGE_PATH=@TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config_dev.sql \
+--           ./04_deploy_notebook.sh
+--
+--       CONFIG_STAGE=@TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config_dev.sql \
+--           ./09_deploy_dashboard.sh
+--
+--   Do NOT maintain two copies of the values in different scripts.
 --
 --#############################################################################
 
--- Bump this on every edit. Echoed at load time so a stale staged copy is visible.
-SET CONFIG_REVISION = '2026-08-19c';
+-- Derived by publish_config.sh from a hash of the SET values in your working
+-- copy, so it cannot drift from the content it describes and cannot be forgotten.
+--
+-- Left as a sentinel here deliberately: if you ever see INJECTED_AT_PUBLISH in a
+-- script's load echo or in the staged file, then the file reached the stage
+-- WITHOUT going through publish_config.sh, and the staleness checks in
+-- 04_deploy_notebook.sh / 09_deploy_dashboard.sh cannot protect you.
+SET CONFIG_REVISION = 'INJECTED_AT_PUBLISH';
 
 -- Core naming - change these to create a parallel deployment
 SET PROJECT_DB = 'TRANSCRIPTION_DB_V2';              -- Database name

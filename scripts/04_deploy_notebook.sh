@@ -189,6 +189,25 @@ echo "  Compute pool: $CFG_PROJECT_COMPUTE_POOL"
 echo ""
 
 # ---------------------------------------------------------------------------
+# Step 1b: refuse to deploy against a stale staged config
+#
+# CONFIG_REVISION is a hash of the SET values, so it can be recomputed from the
+# local file and compared. Without this, editing 00_config.sql and forgetting
+# ./publish_config.sh deploys the PREVIOUS values silently.
+#
+# Skipped (not failed) when there is no local config file: deploying from a fresh
+# clone against a config someone else published is legitimate.
+# ---------------------------------------------------------------------------
+FRESH_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_config_fresh.sh"
+if [ -x "$FRESH_CHECK" ]; then
+    "$FRESH_CHECK" "$CFG_CONFIG_REVISION" "$CONFIG_STAGE_PATH"
+    echo ""
+else
+    echo -e "${YELLOW}Note: check_config_fresh.sh not found; skipping staleness check.${NC}"
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
 # Step 2 (optional): suspend the task so a deploy cannot race a running job
 # ---------------------------------------------------------------------------
 if [ "$SAFE_MODE" = true ]; then

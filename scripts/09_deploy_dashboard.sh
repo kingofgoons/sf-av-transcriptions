@@ -100,7 +100,7 @@ echo ""
 echo "Reading config from ${CONFIG_STAGE}..."
 CONFIG_OUT="$(snow sql --connection "${CONNECTION}" --enable-templating NONE -q "
 EXECUTE IMMEDIATE FROM ${CONFIG_STAGE};
-SELECT \$FQ_SCHEMA || '|' || \$PROJECT_STREAMLIT || '|' || \$PROJECT_APP_ROLE || '|' || \$PROJECT_WH || '|' || \$PROJECT_STREAMLIT_TITLE AS CFG;
+SELECT \$FQ_SCHEMA || '|' || \$PROJECT_STREAMLIT || '|' || \$PROJECT_APP_ROLE || '|' || \$PROJECT_WH || '|' || \$PROJECT_STREAMLIT_TITLE || '|' || \$CONFIG_REVISION AS CFG;
 " --format json)"
 
 CFG="$(printf '%s' "${CONFIG_OUT}" | /usr/bin/python3 -c "
@@ -116,11 +116,13 @@ APP_NAME="$(cut -d'|' -f2 <<<"${CFG}")"
 APP_ROLE="$(cut -d'|' -f3 <<<"${CFG}")"
 APP_WH="$(cut -d'|' -f4 <<<"${CFG}")"
 APP_TITLE="$(cut -d'|' -f5 <<<"${CFG}")"
+CFG_REVISION="$(cut -d'|' -f6 <<<"${CFG}")"
 FQ_APP="${FQ_SCHEMA}.${APP_NAME}"
 APP_STAGE="${FQ_SCHEMA}.STREAMLIT_STAGE"
 STAGE_DIR="${APP_NAME}"
 
 MODULE_COUNT=$(find "${APP_DIR}" -maxdepth 1 -name '*.py' | wc -l | tr -d ' ')
+echo "  revision: ${CFG_REVISION}"
 echo "  schema:   ${FQ_SCHEMA}"
 echo "  app:      ${FQ_APP}"
 echo "  title:    ${APP_TITLE}"
@@ -128,6 +130,25 @@ echo "  owner:    ${APP_ROLE}"
 echo "  wh:       ${APP_WH}"
 echo "  modules:  ${MODULE_COUNT} .py files + .streamlit/config.toml + environment.yml"
 echo ""
+
+# ---------------------------------------------------------------------------
+# 0b. Refuse to deploy against a stale staged config.
+#
+# CONFIG_REVISION is a hash of the SET values, so it can be recomputed from the
+# local file and compared. Without this, editing 00_config.sql and forgetting
+# ./publish_config.sh deploys the PREVIOUS values silently.
+#
+# Skipped (not failed) when there is no local config file: deploying from a fresh
+# clone against a config someone else published is legitimate.
+# ---------------------------------------------------------------------------
+FRESH_CHECK="${SCRIPT_DIR}/check_config_fresh.sh"
+if [[ -x "${FRESH_CHECK}" ]]; then
+    "${FRESH_CHECK}" "${CFG_REVISION}" "${CONFIG_STAGE}"
+    echo ""
+else
+    echo -e "${YELLOW}Note: check_config_fresh.sh not found; skipping staleness check.${NC}"
+    echo ""
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Clear stale staged files, then upload. AUTO_COMPRESS=FALSE keeps sources readable.

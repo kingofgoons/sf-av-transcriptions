@@ -22,6 +22,16 @@ rsa_key.pub
 av.uploader/config.json
 **/config.json
 
+# Deployment config working copies. scripts/00_config.sql.template IS tracked and
+# holds the documented defaults; your edited copy is not, so each installation can
+# target its own objects without committing local values or fighting merge
+# conflicts. Create it with ./scripts/init_config.sh. Same split as
+# av.uploader/config.template.json -> av.uploader/config.json above.
+#
+# The glob also covers parallel-deployment copies (e.g. 00_config_dev.sql). It does
+# NOT match the template, which ends in .template rather than .sql.
+scripts/00_config*.sql
+
 # Cortex Code local files
 .cortex/
 

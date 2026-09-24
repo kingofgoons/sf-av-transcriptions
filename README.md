@@ -111,9 +111,11 @@ This project provides:
 # 0. ONCE PER ACCOUNT - create the shared config store (deploy DB + stage)
 snow sql -f scripts/01_bootstrap.sql --connection YOUR_CONNECTION
 
-# 1. Edit scripts/00_config.sql for your deployment, bump CONFIG_REVISION, then
-#    publish it. Every later script reads the STAGED copy, so this is required.
-cd scripts/ && ./publish_config.sh && cd ..
+# 1. Create your local config from the tracked template, edit it, then publish.
+#    scripts/00_config.sql is GITIGNORED so each installation targets its own
+#    objects without committing local values. Every later script reads the STAGED
+#    copy, so publishing is required.
+cd scripts/ && ./init_config.sh && $EDITOR 00_config.sql && ./publish_config.sh && cd ..
 
 # 2. Create database objects, warehouse, compute pool, and table
 #    Idempotent: stateful objects (db, schema, stages, results table, pool, notebook)
@@ -207,39 +209,65 @@ FORCE_RETRANSCRIBE = False            # Re-process all files
 
 ### Parallel Deployments
 
-`scripts/00_config.sql` is the **single source of truth** for every object name. No other
+`scripts/00_config.sql.template` is version controlled and holds the documented
+defaults. Your working copy, `scripts/00_config.sql`, is **gitignored** so each
+installation can target its own objects without committing local values or
+generating merge conflicts. Same split as `av.uploader/config.template.json`.
+
+The working copy is the **single source of truth** for every object name. No other
 script contains a config block; each loads it with one line:
 
 ```sql
 EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 ```
 
-To deploy another instance (dev/staging/prod), edit the values, bump the revision, and
-publish:
+To deploy another instance (dev/staging/prod), create a second working copy and
+edit its values:
+
+```bash
+cd scripts/
+./init_config.sh --output 00_config_dev.sql
+```
 
 ```sql
-SET CONFIG_REVISION = '2026-08-18c';
 SET PROJECT_DB = 'TRANSCRIPTION_DEV';
 SET PROJECT_SCHEMA = 'TRANSCRIPTION_SCHEMA';
 SET PROJECT_WH = 'TRANSCRIPTION_DEV_WH';
 SET PROJECT_COMPUTE_POOL = 'TRANSCRIPTION_DEV_GPU_POOL';
 ```
 
+Publish it, then point the consumers at it using the override each already supports:
+
 ```bash
-cd scripts/ && ./publish_config.sh
+CONFIG_FILE=00_config_dev.sql ./publish_config.sh
+
+CONFIG_STAGE_PATH=@TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config_dev.sql ./04_deploy_notebook.sh
+CONFIG_STAGE=@TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config_dev.sql ./09_deploy_dashboard.sh
 ```
 
-Scripts read the **staged** copy, so publishing is required for changes to take effect.
-Each script echoes `CONFIG_REVISION` as its first result so a stale staged copy is
-obvious. To run two deployments side by side, stage a second file (e.g.
-`00_config_dev.sql`) and point the include at it.
+**You do not maintain `CONFIG_REVISION` by hand.** `publish_config.sh` derives it
+from a hash of your `SET` values. Because it is content-derived,
+`04_deploy_notebook.sh` and `09_deploy_dashboard.sh` can recompute it from your
+local file and **refuse to deploy against a stale staged copy** — which previously
+failed silently, using the old values while you believed your edits were live.
+
+`publish_config.sh` also fails if the template gains a variable your working copy
+lacks, naming the missing key, rather than letting a script fail later on an unset
+session variable.
+
+Run `pytest tests/test_config.py` to verify the whole mechanism offline; it needs no
+Snowflake connection.
 
 ## Project Structure
 
 ```
 audio-video-transcription-snowflake/
 ├── scripts/
-│   ├── 00_config.sql                 # SINGLE SOURCE OF TRUTH for object names
+│   ├── 00_config.sql.template        # TEMPLATE for object names (tracked)
+│   ├── 00_config.sql                 # Your working copy (gitignored)
+│   ├── init_config.sh                # Utility: create your copy from the template
+│   ├── config_revision.sh            # Utility: content hash used as CONFIG_REVISION
+│   ├── check_config_fresh.sh         # Utility: refuse to deploy on a stale staged config
 │   ├── 01_bootstrap.sql              # Deploy DB + config stage (once per account)
 │   ├── 02_setup.sql                  # Database, schema, stage, compute pool, table
 │   ├── 03_automate.sql               # Gate procedure + scheduleless task
@@ -250,7 +278,7 @@ audio-video-transcription-snowflake/
 │   ├── 07_reset.sql                  # Stream reset (stopgap)
 │   ├── 08_telemetry_debug.sql        # Container telemetry diagnostics
 │   ├── 999_teardown.sql               # GUARDED teardown (4 levels, 5 guards)
-│   ├── publish_config.sh             # Utility: PUT 00_config.sql to the stage
+│   ├── publish_config.sh             # Utility: validate, stamp, and stage your config
 │   ├── sync_gong_query.sql           # Utility: Gong call SELECT (runs on Snowhouse)
 │   └── install_ffmpeg.sh             # Utility: ffmpeg install in container
 ├── notebooks/
