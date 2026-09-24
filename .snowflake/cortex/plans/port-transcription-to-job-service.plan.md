@@ -308,7 +308,7 @@ Retire the headless notebook path while keeping the notebook for interactive use
 
 - `which ffmpeg` and `which ffprobe` both resolve; `ffmpeg -version` reports 6.x
 - `torch.cuda.is_available()` is True and names a GPU
-- OAuth session returns the expected role and a row count matching `TRANSCRIPTION_RESULTS` at the time of the spike (**447 as of 2026-08-19** — read it live rather than asserting a literal, since this number moves with every run)
+- OAuth session returns the expected role and a row count matching `TRANSCRIPTION_RESULTS` at the time of the spike (**491 as of 2026-09-24** — read it live rather than asserting a literal, since this number moves with every run. It was 447 on 2026-08-19; five weeks of normal use added 44)
 - The mounted AV stage volume lists media files
 
 **Payload parity (task 4):**
