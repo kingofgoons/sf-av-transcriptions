@@ -435,8 +435,13 @@ def test_fresh_clone_has_a_template_but_no_working_config(tmp_path):
 
 def test_no_tracked_file_tells_operators_to_bump_config_revision():
     """CONFIG_REVISION is derived now. Any instruction to hand-bump it is wrong and
-    would teach an operator to fight the tooling."""
+    would teach an operator to fight the tooling.
+
+    Excludes tests/ (this file necessarily contains the phrase it searches for),
+    the captured pre-extraction fixture, and the plans directory, which records the
+    old behaviour deliberately as history.
+    """
     r = run(["git", "-C", REPO, "grep", "-l", "-i", "bump CONFIG_REVISION", "--", ".",
-             ":!tests/fixtures", ":!.snowflake/cortex/plans"])
+             ":!tests", ":!.snowflake/cortex/plans"])
     offenders = [f for f in r.stdout.split() if f]
     assert not offenders, f"stale 'bump CONFIG_REVISION' instructions in: {offenders}"
