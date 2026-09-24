@@ -72,37 +72,67 @@ support case. The job-service port remains the fix.
 
 ## Remaining work
 
-### 0. STATUS: the ledger is BUILT and DEPLOYED but NOT YET VALIDATED on real hardware
+### 0. STATUS: VALIDATED 2026-09-24. The leak hypothesis is refuted by direct measurement.
 
-Implemented 2026-08-19 (commit `9e3fd8a`) and deployed to `TRANSCRIBE_AV_FILES_V2`. Item 1 below
-(the temp-WAV `finally` fix) is **done** in the same commit.
+Implemented 2026-08-19 (`9e3fd8a`), deployed, and **validated for free** on 2026-09-24 from
+five runs that occurred during normal use. No dedicated GPU run was needed.
 
-Deliberately **not** validated with a dedicated run — that costs a GPU spin-up and a 3-file run
-carries ~75% hang odds plus manual pool reclamation, and the ledger produces its data for free on
-the next genuine transcription. So it will fire whenever real work next arrives.
+All three first-run checks pass:
 
-**On the first real run, check these three things.** They are the parts that could only be tested
-against a simulated `/proc` locally, because macOS has no `/proc`:
+1. **`fd=` and `os_children=` report real numbers, not `-1`** — the `/proc` reads work in the
+   container, so the two most useful metrics are live rather than blind.
+2. **`RECONCILE` reports `OK` on all 5 runs** (4-, 1-, 2-, 2- and 2-file):
+   `created=N removed=N unaccounted=0 on_disk=0`. The `finally` fix holds on real ffmpeg paths.
+3. **The per-file curve is flat.**
+
+**The decisive result: the 2026-09-21 12:34 EDT hung run was instrumented.** 4 files, work
+finished in 397s, task killed at 1,801s on the timeout — a ~1,404s tail gap. Its four
+per-file boundaries:
+
+```
+file 1/4 START  fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=279.4MB
+file 1/4 END    fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 2/4 START  fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 2/4 END    fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 3/4 START  fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 3/4 END    fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 4/4 START  fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+file 4/4 END    fd=76 threads=12 nondaemon=3 os_children=1 tmp_wav=0 cuda_alloc=287.5MB
+```
+
+Every counter constant across four files, `created=4 removed=4 OK`, and then the container
+hung for 23 minutes. **Nothing accumulated.** The race conclusion is now established by
+direct per-file measurement on a hung run rather than inferred from a teardown census.
+
+Reproduce:
 
 ```sql
-SELECT TIMESTAMP, LEFT(VALUE::VARCHAR, 150) AS LINE
+SELECT TO_CHAR(TIMESTAMP, 'MM-DD HH24:MI:SS') AS TS_UTC, VALUE::VARCHAR AS LINE
 FROM SNOWFLAKE.TELEMETRY.EVENTS
 WHERE RESOURCE_ATTRIBUTES:"snow.executable.name"::VARCHAR = 'TRANSCRIBE_AV_FILES_V2'
   AND RECORD_TYPE = 'LOG'
-  AND VALUE::VARCHAR LIKE '[LEDGER%'
+  AND (VALUE::VARCHAR LIKE '[LEDGER%' OR VALUE::VARCHAR LIKE '%temp wav%')
 ORDER BY TIMESTAMP;
 ```
 
-1. **`fd=` and `os_children=` are real numbers, not `-1`.** `-1` means the `/proc` read failed in
-   the container, so the two most useful metrics are blind and the code needs fixing.
-2. **`[LEDGER RECONCILE]` reports `OK`**, with `created` == `removed` and `on_disk=0`. A `LEAK`
-   verdict on a clean run means the `finally` fix is wrong.
-3. **On a multi-file run, compare `fd`/`threads`/`os_children` across the per-file `START` lines.**
-   Flat means no accumulation and the race conclusion stands. Rising means there IS a per-file
-   leak, which would reopen the question this plan was written to close — that is the one result
-   that would change the diagnosis.
+Note the filter must include `temp wav`: the reconcile verdict line does **not** contain the
+string `LEDGER`, so a `LIKE '%LEDGER%'` filter silently hides the OK/LEAK result.
 
-### 1. Fix the temp-WAV leak on failure paths — DONE (commit `9e3fd8a`)
+**Three corrections to earlier notes, from this measurement:**
+
+- **`os_children=1` persistently.** One OS child process exists, constant and non-growing.
+  `multiprocessing.active_children()` reports `0` and cannot see it — precisely the blind
+  spot that made the original "zero children" claim unsound. This vindicates returning
+  `None`/`-1` for an unmeasurable value rather than a confident `0`.
+- **`nondaemon=3`, not 2** as recorded from the 2026-08-19 teardown census.
+- **CUDA is ~287 MB allocated / 566 MB reserved**, not 8.5 MB. The old figure was taken
+  post-teardown, so it described residue rather than working set. Item 2 below is reframed.
+
+**Consequence:** items 1 and 3 below are closed or moot. This plan is effectively complete.
+The hang remains live — 1 of 6 task runs in the 7-day window, hitting the only 4-file run —
+and the job-service port remains the only fix.
+
+### 1. Fix the temp-WAV leak on failure paths — DONE (commit `9e3fd8a`), VERIFIED 2026-09-24
 
 Real defect, low severity. In `transcribe_media_file` (cell 19) the cleanup
 
