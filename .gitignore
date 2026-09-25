@@ -9,6 +9,20 @@ DIARY.md
 AUDIO_VIDEO_STAGE_FILES/**
 !AUDIO_VIDEO_STAGE_FILES/.gitkeep
 
+# Downloaded SRT exports. These are customer meeting transcripts pulled out of
+# TRANSCRIPTION_RESULTS by av.uploader/download_srts.py — generated artifacts, and content
+# that should never land in a git history.
+#
+# Both rules are needed. srt_output/ is only the DEFAULT --output directory; the flag takes
+# an arbitrary path (the README shows `--output ./my_srts`), so the directory rule alone
+# would leave any other choice exposed. The *.srt glob is the actual safety net.
+#
+# No .srt file is tracked today and none is used as a test fixture — the golden corpus is
+# .jsonl.gz — so the glob costs nothing. If an .srt is ever needed as a fixture, add a
+# negation here rather than narrowing the glob.
+av.uploader/srt_output/
+*.srt
+
 # Exclude examples folder
 examples.to.use/
 
