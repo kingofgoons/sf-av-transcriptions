@@ -259,16 +259,51 @@ av.uploader/
 
 ### Usage
 
+A date window is required. `--today`, `--yesterday` and `--days N` are shortcuts; `--start` and
+`--end` take explicit dates and must be given together.
+
 ```bash
-# Download SRTs for a date range (writes both plain and speaker-labeled SRTs)
+# Today's transcriptions (local calendar day)
+python download_srts.py --today
+
+# Yesterday, or the last N days including today (--days 1 == --today)
+python download_srts.py --yesterday
+python download_srts.py --days 7
+
+# An explicit range, both ends inclusive
 python download_srts.py --start 2024-01-01 --end 2024-01-31
 
 # Write to a custom output directory
-python download_srts.py --start 2024-01-01 --end 2024-01-31 --output ./my_srts
+python download_srts.py --today --output ./my_srts
 
 # Skip plain SRT, write only speaker-labeled SRTs
-python download_srts.py --start 2024-01-01 --end 2024-01-31 --no-plain
+python download_srts.py --days 7 --no-plain
 ```
+
+#### Dates are local; the column is UTC
+
+`TRANSCRIPTION_TIMESTAMP` is `TIMESTAMP_NTZ` holding **UTC**. `TIMESTAMP_NTZ` carries no offset,
+so nothing in the schema says so. The dates you pass are read in **this machine's** timezone and
+converted to UTC bounds before the query runs, so `--today` means your calendar day rather than
+UTC's. The script prints both, and DST is handled from the machine's real offset for that date:
+
+```
+Querying local 2026-09-25 (today)
+  -> TRANSCRIPTION_TIMESTAMP >= 2026-09-25 04:00:00 UTC
+                             <  2026-09-26 04:00:00 UTC
+```
+
+> **Behaviour change, 2026-09-25.** Before this conversion existed, `--start X --end X` compared
+> local-intent dates straight against the UTC column — in US Eastern that really returned 20:00
+> the previous day through 20:00 on X, missing that evening's transcripts and including the
+> previous evening's. The same invocation now returns a different, correct set of rows, so exports
+> taken before and after this date are not directly comparable. In practice nothing was ever
+> misfiled: 0 of 497 rows fell in the affected window.
+
+Note the filter is on the **processing** date, while output files are *named* from the source
+filename, which encodes the **meeting** date. These legitimately differ — about a third of rows
+were transcribed on a different day than the meeting — so `--today` can produce files named with
+older dates. That is correct, not over-selection.
 
 ### Arguments
 

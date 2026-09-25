@@ -1,12 +1,25 @@
 """
-Download SRT subtitle files from TRANSCRIPTION_RESULTS for a given processing date range.
+Download SRT subtitle files from TRANSCRIPTION_RESULTS for a range of processing dates.
 Writes <filename>.srt and <filename>_speakers.srt for each matching row.
+
+DATES ARE LOCAL; THE COLUMN IS UTC
+
+  TRANSCRIPTION_RESULTS.TRANSCRIPTION_TIMESTAMP is TIMESTAMP_NTZ holding UTC. NTZ carries
+  no offset, so nothing in the schema says so and a naive date comparison is wrong by the
+  local offset. The dates you pass are interpreted in THIS MACHINE'S timezone and converted
+  to UTC bounds before the query runs, so `--today` means your calendar day, not UTC's.
+
+  BEHAVIOUR CHANGE: before this conversion existed, `--start X --end X` compared local-intent
+  dates directly against the UTC column, which in US Eastern actually returned 20:00 the
+  previous day through 20:00 on X - silently missing that day's evening transcripts and
+  including the previous evening's. The same invocation now returns a different, correct set
+  of rows. Exports taken before and after this change are not directly comparable.
 """
 import sys
 import json
 import argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, time, timedelta, timezone
 
 import snowflake.connector
 from cryptography.hazmat.backends import default_backend
@@ -71,7 +84,86 @@ def connect_to_snowflake(config):
         sys.exit(1)
 
 
-def fetch_transcripts(conn, config, start_date, end_date):
+def parse_ymd(value, label):
+    """Parse a YYYY-MM-DD string to a date, raising ValueError that names the flag."""
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        raise ValueError(f"{label} must be in YYYY-MM-DD format, got: {value}")
+
+
+def resolve_dates(args, today=None):
+    """Resolve the date flags to (start_date, end_date, label) as inclusive LOCAL dates.
+
+    `today` is injectable so tests do not depend on the calendar. Raises ValueError naming
+    the flag at fault; the caller turns that into an exit status.
+    """
+    if today is None:
+        today = date.today()
+
+    days = getattr(args, 'days', None)
+    shortcuts = sum([bool(getattr(args, 'today', False)),
+                     bool(getattr(args, 'yesterday', False)),
+                     days is not None])
+    start_raw = getattr(args, 'start', None)
+    end_raw = getattr(args, 'end', None)
+    explicit = start_raw is not None or end_raw is not None
+
+    if shortcuts and explicit:
+        raise ValueError(
+            "--today/--yesterday/--days cannot be combined with --start/--end. "
+            "Use one or the other.")
+    if not shortcuts and not explicit:
+        raise ValueError(
+            "No date range given. Use --today, --yesterday, --days N, "
+            "or --start and --end together.")
+
+    if getattr(args, 'today', False):
+        return today, today, 'today'
+    if getattr(args, 'yesterday', False):
+        y = today - timedelta(days=1)
+        return y, y, 'yesterday'
+    if days is not None:
+        if days < 1:
+            raise ValueError(f"--days must be 1 or greater, got: {days}")
+        # Inclusive of today, so --days 1 is exactly --today.
+        return today - timedelta(days=days - 1), today, f'last {days} day(s) including today'
+
+    if start_raw is None:
+        raise ValueError("--end requires --start")
+    if end_raw is None:
+        raise ValueError("--start requires --end")
+
+    start = parse_ymd(start_raw, '--start')
+    end = parse_ymd(end_raw, '--end')
+    if start > end:
+        raise ValueError(f"--start ({start}) must be on or before --end ({end})")
+    return start, end, 'explicit range'
+
+
+def local_day_bounds_utc(start_date, end_date):
+    """Half-open UTC bounds covering local [start_date 00:00, end_date+1day 00:00).
+
+    Returns naive datetimes, because the target column is TIMESTAMP_NTZ and the connector
+    would otherwise bind an offset the column cannot hold.
+
+    .astimezone() on a naive datetime attaches the machine's real offset FOR THAT DATE, so
+    DST is handled without naming a zone: in US Eastern, 2026-03-08 spans 23 hours and
+    2026-11-01 spans 25. Hardcoding a 4- or 5-hour shift would be wrong twice a year.
+    """
+    start_local = datetime.combine(start_date, time.min).astimezone()
+    end_local = datetime.combine(end_date + timedelta(days=1), time.min).astimezone()
+    return (start_local.astimezone(timezone.utc).replace(tzinfo=None),
+            end_local.astimezone(timezone.utc).replace(tzinfo=None))
+
+
+def fetch_transcripts(conn, config, start_utc, end_utc):
+    """Fetch rows whose TRANSCRIPTION_TIMESTAMP falls in [start_utc, end_utc).
+
+    Both bounds are naive UTC datetimes from local_day_bounds_utc. The comparison is a
+    plain range scan so Snowflake can prune micro-partitions; wrapping the column in
+    CONVERT_TIMEZONE would force a per-row function call and defeat that.
+    """
     db = config['database']
     schema = config['schema']
     query = f"""
@@ -80,12 +172,12 @@ def fetch_transcripts(conn, config, start_date, end_date):
             TRANSCRIPT_WITH_SPEAKERS,
             TRANSCRIPTION_TIMESTAMP
         FROM {db}.{schema}.TRANSCRIPTION_RESULTS
-        WHERE TRANSCRIPTION_TIMESTAMP >= %(start)s
-          AND TRANSCRIPTION_TIMESTAMP <  DATEADD('day', 1, %(end)s::DATE)
+        WHERE TRANSCRIPTION_TIMESTAMP >= %(start_utc)s
+          AND TRANSCRIPTION_TIMESTAMP <  %(end_utc)s
         ORDER BY TRANSCRIPTION_TIMESTAMP
     """
     cursor = conn.cursor()
-    cursor.execute(query, {'start': start_date, 'end': end_date})
+    cursor.execute(query, {'start_utc': start_utc, 'end_utc': end_utc})
     rows = cursor.fetchall()
     cursor.close()
     return rows
@@ -129,10 +221,21 @@ def srt_stem(file_name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download SRT files from TRANSCRIPTION_RESULTS by processing date range"
+        description="Download SRT files from TRANSCRIPTION_RESULTS by processing date range",
+        epilog="Dates are interpreted in this machine's local timezone and converted to UTC, "
+               "because TRANSCRIPTION_TIMESTAMP stores UTC in a TIMESTAMP_NTZ column."
     )
-    parser.add_argument('--start', required=True, help='Start date (YYYY-MM-DD), inclusive')
-    parser.add_argument('--end',   required=True, help='End date (YYYY-MM-DD), inclusive')
+    # argparse can express "at most one shortcut", but not "a shortcut OR the complete
+    # --start/--end pair". resolve_dates() carries the rest of that rule.
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument('--today', action='store_true',
+                        help='Transcripts processed today (local)')
+    window.add_argument('--yesterday', action='store_true',
+                        help='Transcripts processed yesterday (local)')
+    window.add_argument('--days', type=int, metavar='N',
+                        help='Last N local days including today (--days 1 == --today)')
+    parser.add_argument('--start', help='Start date (YYYY-MM-DD), local, inclusive')
+    parser.add_argument('--end', help='End date (YYYY-MM-DD), local, inclusive')
     parser.add_argument('--output', default='srt_output', help='Output directory (default: srt_output)')
     parser.add_argument('--speakers', action='store_true',
                         help='Also write _speakers.srt files (default: write both)')
@@ -140,17 +243,22 @@ def main():
                         help='Skip plain SRT, write only _speakers.srt')
     args = parser.parse_args()
 
-    # Validate dates
-    for label, val in [('--start', args.start), ('--end', args.end)]:
-        try:
-            datetime.strptime(val, '%Y-%m-%d')
-        except ValueError:
-            print(f"Error: {label} must be in YYYY-MM-DD format, got: {val}")
-            sys.exit(1)
-
-    if args.start > args.end:
-        print("Error: --start must be on or before --end")
+    try:
+        start_date, end_date, label = resolve_dates(args)
+    except ValueError as e:
+        print(f"Error: {e}")
         sys.exit(1)
+
+    start_utc, end_utc = local_day_bounds_utc(start_date, end_date)
+
+    # Print the conversion before connecting, so a wrong window costs no round trip. An
+    # unexplained local->UTC shift is what made the old single-day query return wrong rows.
+    if start_date == end_date:
+        print(f"Querying local {start_date} ({label})")
+    else:
+        print(f"Querying local {start_date} to {end_date} inclusive ({label})")
+    print(f"  -> TRANSCRIPTION_TIMESTAMP >= {start_utc} UTC")
+    print(f"                             <  {end_utc} UTC")
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -159,8 +267,7 @@ def main():
     conn = connect_to_snowflake(config)
 
     try:
-        print(f"Querying transcriptions from {args.start} to {args.end}...")
-        rows = fetch_transcripts(conn, config, args.start, args.end)
+        rows = fetch_transcripts(conn, config, start_utc, end_utc)
     finally:
         conn.close()
 

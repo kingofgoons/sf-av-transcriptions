@@ -295,8 +295,14 @@ hang; on the job-service path it indicates a new exit fault worth investigating.
 
 ```bash
 streamlit run streamlit/transcription_dashboard.py   # needs st.connection, not SiS session
-cd av.uploader/ && python download_srts.py           # bulk SRT export
+cd av.uploader/ && python download_srts.py --today   # SRT export for today (local)
 ```
+
+`download_srts.py` needs a window — `--today`, `--yesterday`, `--days N`, or `--start`+`--end`.
+Dates are **local** and converted to UTC before the query, because `TRANSCRIPTION_TIMESTAMP` is
+`TIMESTAMP_NTZ` holding UTC. Before 2026-09-25 the dates were compared raw, so a single-day
+export actually covered 20:00 the previous evening to 20:00 that day — **an export taken before
+that date is not comparable to one taken after.** See `architecture.md` §6.
 
 ---
 

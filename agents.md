@@ -105,7 +105,7 @@ cd scripts/ && ./04_deploy_notebook.sh
 # Gong sync, dashboard, SRT export
 cd scripts/ && ./06_sync_gong.sh
 streamlit run transcription_dashboard.py
-cd av.uploader/ && python download_srts.py
+cd av.uploader/ && python download_srts.py --today
 ```
 
 Every SQL script prints a `CONFIG_REVISION` row first. If it is not the revision you just

@@ -289,6 +289,50 @@ fails, the gate can return `SKIPPED` on files the payload would have found. The 
 `ACCOUNT_NAME` and `CALL_START_TS` are parsed from the filename convention
 `YYYY-MM-DD HH-MM-SS_Account_description.mp4`.
 
+### Timestamp semantics — three types, three meanings
+
+Nothing in the schema states which zone a timestamp is in, and two of these three columns are
+routinely compared as though they matched. They do not.
+
+| Column | Type | Written by | Reads as |
+|---|---|---|---|
+| `TRANSCRIPTION_RESULTS.TRANSCRIPTION_TIMESTAMP` | `TIMESTAMP_NTZ` | payload, `datetime.now(timezone.utc)` | **UTC**, but the type cannot say so |
+| `TRANSCRIPTION_RESULTS.CALL_START_TS` | `TIMESTAMP_NTZ` | parsed from the filename | whatever zone the recorder used — unknowable |
+| `TRANSCRIPTION_RUN_EVENTS.EVENT_TS` | `TIMESTAMP_LTZ` | `CURRENT_TIMESTAMP()` | session-local, correctly |
+
+`TRANSCRIPTION_TIMESTAMP` and `EVENT_TS` describe the same run and disagree by the session
+offset, because one comes from Python's clock inside the container and the other from
+Snowflake's session. In `America/New_York` a run logged at `18:32` in the results table appears
+as `14:32` in the events table. Neither is wrong; they are in different zones and nothing
+reconciles them.
+
+**Consumers must convert.** `TRANSCRIPTION_TIMESTAMP::DATE` gives the UTC date, so for a
+US-Eastern operator it rolls over at 20:00 the previous evening. Filtering "today" needs local
+day bounds converted to UTC first — which is what `av.uploader/download_srts.py` does in
+`local_day_bounds_utc()`, client-side, so the predicate stays a range scan that can prune
+micro-partitions. `CONVERT_TIMEZONE` on the column would work but needs a hardcoded zone name
+and forces a per-row function call.
+
+Until 2026-09-25 the payload used a bare `datetime.now()`. The stored values were UTC only
+because the Container Runtime happens to run UTC; had that changed, the column's meaning would
+have shifted mid-table with no offset stored to tell the eras apart. The call is now explicit.
+`transcribe_functions.py` still uses a bare `datetime.now()` for the `**Generated:**` line in
+`SUMMARY_MARKDOWN`, which is display text, never queried.
+
+**The real fix is deferred.** `TIMESTAMP_LTZ` would make the column self-describing and make
+`::DATE` and `CURRENT_DATE()` behave, as they already do for `EVENT_TS`. It is not a one-line
+change: [`ALTER TABLE … ALTER COLUMN`](https://docs.snowflake.com/en/sql-reference/sql/alter-table-column)
+lists changing a column to a different type as **unsupported**, and `SET DATA TYPE` accepts only
+`NUMBER` and text types — so `NTZ → LTZ` means add a column, backfill, drop, rename, or CTAS and
+swap. That rewrites every existing row, and the column feeds `UNIFIED_MEETINGS_V` →
+`MEETING_SEARCH` (which would need reindexing) → the semantic view → the agent, plus roughly
+fifteen source files. Worth doing as its own migration; not worth bundling into a CLI change.
+
+**Related latent issue, not yet fixed.** `UNIFIED_MEETINGS_V` unions `CALL_START_TS` from
+`TRANSCRIPTION_RESULTS` (`TIMESTAMP_NTZ`) with the same column from `GONG_CALLS_MIRROR`
+(`TIMESTAMP_TZ`). The `UNION ALL` coerces to `TIMESTAMP_NTZ`, silently discarding the offset
+Gong supplies.
+
 ## 7. Performance envelope
 
 Whisper `base` on `GPU_NV_S` runs at **0.035-0.06x realtime**

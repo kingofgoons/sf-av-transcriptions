@@ -32,7 +32,7 @@ ENVIRONMENT, measured 2026-09-24 on gpu_x86_64:2.9.0
 
 WHAT IS DELIBERATELY PRESERVED, EVEN THOUGH IT LOOKS WRONG
 
-  - `from datetime import datetime`, never `import datetime`. parse_filename_metadata
+  - `from datetime import datetime, timezone`, never `import datetime`. parse_filename_metadata
     calls datetime.strptime directly and swallows AttributeError, so the wrong import
     nulls CALL_START_TS on every file with no error anywhere. Guarded by a test.
   - The 23-column INSERT order, matched to the notebook exactly.
@@ -53,6 +53,10 @@ WHAT IS DELIBERATELY DIFFERENT
   - Absolute temp dir via tempfile.mkdtemp(), not the notebook's cwd-relative
     'media_files'.
   - logging, not print.
+  - TRANSCRIPTION_TIMESTAMP uses datetime.now(timezone.utc), where the notebook uses a
+    bare datetime.now(). The stored string is identical - this runtime is UTC, so both
+    produce the same value - but the notebook's version is UTC only by accident, and
+    TIMESTAMP_NTZ carries no offset to say so. See the comment at the assignment.
 """
 
 import argparse
@@ -65,7 +69,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -631,7 +635,15 @@ def build_record(file_path, file_name, transcript, language, processing_time,
         'CALL_START_TS': (meta['call_start_ts'].strftime('%Y-%m-%d %H:%M:%S')
                           if meta['call_start_ts'] else None),
         'PARTICIPANTS_JSON': participants,
-        'TRANSCRIPTION_TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+        # UTC, explicitly. The column is TIMESTAMP_NTZ, which cannot express a zone, so
+        # this call is the only place the contract exists - every reader has to convert.
+        # A bare datetime.now() would return the container's wall clock, which is UTC
+        # today but would silently change the column's meaning mid-table if the runtime's
+        # timezone ever moved, with no offset stored to tell the eras apart.
+        # Note TRANSCRIPTION_RUN_EVENTS.EVENT_TS is populated by CURRENT_TIMESTAMP() and
+        # is TIMESTAMP_LTZ, so it reads as session-local. The two columns are not
+        # comparable without a conversion.
+        'TRANSCRIPTION_TIMESTAMP': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'),
     }
 
 

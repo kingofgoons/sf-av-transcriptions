@@ -223,3 +223,212 @@ def test_format_size_is_human_readable(up):
     assert up.format_size(0).startswith('0')
     assert 'KB' in up.format_size(2048)
     assert 'MB' in up.format_size(5 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# Date-window resolution and the local -> UTC conversion
+#
+# TRANSCRIPTION_TIMESTAMP is TIMESTAMP_NTZ holding UTC. Before this conversion existed,
+# `--start X --end X` compared a local-intent date straight against that UTC column, so in
+# US Eastern it actually returned 20:00 the previous day through 20:00 on X - missing that
+# evening's transcripts. These tests pin TZ so they assert the arithmetic, not the machine.
+# ---------------------------------------------------------------------------
+
+import os
+import time as _time
+from argparse import Namespace
+from datetime import date, datetime, timedelta
+
+
+@pytest.fixture
+def eastern():
+    """Pin the process timezone to America/New_York for one test, then restore it.
+
+    time.tzset() is process-global, so the restore matters - without it a later test
+    inherits Eastern and passes or fails for the wrong reason.
+    """
+    prior = os.environ.get('TZ')
+    os.environ['TZ'] = 'America/New_York'
+    _time.tzset()
+    yield
+    if prior is None:
+        os.environ.pop('TZ', None)
+    else:
+        os.environ['TZ'] = prior
+    _time.tzset()
+
+
+def _args(**kw):
+    """An argparse-shaped stub. resolve_dates uses getattr defaults, so omitted flags are
+    absent rather than None, which is also how a partially-built Namespace behaves."""
+    base = {'today': False, 'yesterday': False, 'days': None, 'start': None, 'end': None}
+    base.update(kw)
+    return Namespace(**base)
+
+
+TODAY = date(2026, 9, 25)
+
+
+def test_today_resolves_to_a_single_local_day(dl):
+    start, end, label = dl.resolve_dates(_args(today=True), today=TODAY)
+    assert (start, end) == (TODAY, TODAY)
+    assert label == 'today'
+
+
+def test_yesterday_resolves_to_the_prior_local_day(dl):
+    start, end, _ = dl.resolve_dates(_args(yesterday=True), today=TODAY)
+    assert (start, end) == (date(2026, 9, 24), date(2026, 9, 24))
+
+
+def test_days_counts_back_inclusive_of_today(dl):
+    start, end, _ = dl.resolve_dates(_args(days=3), today=TODAY)
+    assert (start, end) == (date(2026, 9, 23), TODAY), "3 days = today + 2 back"
+
+
+def test_days_one_is_exactly_today(dl):
+    """Documented in --help, so it is a contract: --days 1 must not be off by one."""
+    assert (dl.resolve_dates(_args(days=1), today=TODAY)[:2]
+            == dl.resolve_dates(_args(today=True), today=TODAY)[:2])
+
+
+def test_explicit_range_parses_both_ends(dl):
+    start, end, label = dl.resolve_dates(
+        _args(start='2026-09-01', end='2026-09-25'), today=TODAY)
+    assert (start, end) == (date(2026, 9, 1), date(2026, 9, 25))
+    assert label == 'explicit range'
+
+
+def test_explicit_single_date_is_allowed(dl):
+    start, end, _ = dl.resolve_dates(
+        _args(start='2026-09-25', end='2026-09-25'), today=TODAY)
+    assert start == end == TODAY
+
+
+@pytest.mark.parametrize('kwargs,expect', [
+    ({},                                              'No date range'),
+    ({'start': '2026-09-25'},                         '--start requires --end'),
+    ({'end': '2026-09-25'},                           '--end requires --start'),
+    ({'today': True, 'start': '2026-09-25', 'end': '2026-09-25'}, 'cannot be combined'),
+    ({'days': 0},                                     '--days must be 1 or greater'),
+    ({'days': -1},                                    '--days must be 1 or greater'),
+    ({'start': '2026-09-26', 'end': '2026-09-25'},    'must be on or before'),
+    ({'start': 'not-a-date', 'end': '2026-09-25'},    'YYYY-MM-DD'),
+    ({'start': '2026-09-25', 'end': '09/25/2026'},    'YYYY-MM-DD'),
+    ({'yesterday': True, 'start': '2026-09-25', 'end': '2026-09-25'}, 'cannot be combined'),
+])
+def test_bad_flag_combinations_raise_naming_the_flag(dl, kwargs, expect):
+    """Every rejection has to say which flag is wrong - 'invalid arguments' sends the
+    operator back to the source."""
+    with pytest.raises(ValueError) as e:
+        dl.resolve_dates(_args(**kwargs), today=TODAY)
+    assert expect.lower() in str(e.value).lower(), f"unhelpful message: {e.value}"
+
+
+def test_bounds_shift_by_the_local_offset(dl, eastern):
+    """2026-09-25 is EDT (UTC-4), so the local day is 04:00 UTC to 04:00 UTC next day.
+
+    The old code sent '2026-09-25' and DATEADD'd a day, giving 00:00-00:00 UTC - four hours
+    early at both ends.
+    """
+    start_utc, end_utc = dl.local_day_bounds_utc(TODAY, TODAY)
+    assert start_utc == datetime(2026, 9, 25, 4, 0, 0)
+    assert end_utc == datetime(2026, 9, 26, 4, 0, 0)
+
+
+def test_winter_dates_use_the_five_hour_offset(dl, eastern):
+    """EST, not EDT. A hardcoded -4 would be wrong for half the year."""
+    start_utc, _ = dl.local_day_bounds_utc(date(2026, 1, 15), date(2026, 1, 15))
+    assert start_utc == datetime(2026, 1, 15, 5, 0, 0)
+
+
+def test_bounds_are_naive_so_the_connector_cannot_bind_an_offset(dl, eastern):
+    """The column is TIMESTAMP_NTZ. An aware datetime would carry an offset the column
+    cannot hold, and the driver's coercion is not something to rely on."""
+    start_utc, end_utc = dl.local_day_bounds_utc(TODAY, TODAY)
+    assert start_utc.tzinfo is None and end_utc.tzinfo is None
+
+
+def test_consecutive_days_abut_exactly_without_overlap(dl, eastern):
+    """Half-open [start, end). Yesterday's upper bound must equal today's lower bound, or
+    rows land in both windows or neither."""
+    _, yday_end = dl.local_day_bounds_utc(date(2026, 9, 24), date(2026, 9, 24))
+    today_start, _ = dl.local_day_bounds_utc(TODAY, TODAY)
+    assert yday_end == today_start
+
+
+def test_spring_forward_day_spans_twenty_three_hours(dl, eastern):
+    """2026-03-08 loses an hour. Proves the offset is computed per date, not assumed."""
+    start_utc, end_utc = dl.local_day_bounds_utc(date(2026, 3, 8), date(2026, 3, 8))
+    assert (end_utc - start_utc) == timedelta(hours=23)
+
+
+def test_fall_back_day_spans_twenty_five_hours(dl, eastern):
+    """2026-11-01 gains an hour."""
+    start_utc, end_utc = dl.local_day_bounds_utc(date(2026, 11, 1), date(2026, 11, 1))
+    assert (end_utc - start_utc) == timedelta(hours=25)
+
+
+def test_multi_day_range_covers_every_day_inclusive(dl, eastern):
+    """--start/--end are both inclusive, so a 3-day range spans 3 local days - 72 hours
+    here, since no DST boundary falls inside it."""
+    start_utc, end_utc = dl.local_day_bounds_utc(date(2026, 9, 23), date(2026, 9, 25))
+    assert (end_utc - start_utc) == timedelta(hours=72)
+
+
+def test_today_and_the_equivalent_explicit_range_produce_identical_bounds(dl, eastern):
+    """--today is an alias, not a second code path. If these diverge, one of them is wrong
+    and only the explicit form gets exercised."""
+    via_flag = dl.local_day_bounds_utc(*dl.resolve_dates(_args(today=True), today=TODAY)[:2])
+    via_dates = dl.local_day_bounds_utc(
+        *dl.resolve_dates(_args(start='2026-09-25', end='2026-09-25'), today=TODAY)[:2])
+    assert via_flag == via_dates
+
+
+class _FakeCursor:
+    """Captures the SQL and bound parameters instead of executing them."""
+    def __init__(self):
+        self.sql = None
+        self.params = None
+
+    def execute(self, sql, params=None):
+        self.sql, self.params = sql, params
+
+    def fetchall(self):
+        return []
+
+    def close(self):
+        pass
+
+
+class _FakeConn:
+    def __init__(self):
+        self.cur = _FakeCursor()
+
+    def cursor(self):
+        return self.cur
+
+
+def test_query_binds_utc_bounds_and_no_longer_dateadds_a_local_date(dl, eastern):
+    """Asserts the SQL actually sent, not the file's text - the source also mentions
+    DATEADD and CONVERT_TIMEZONE in comments explaining why they are not used.
+
+    DATEADD('day', 1, %(end)s::DATE) was the old upper bound: it added a day to a LOCAL
+    date and compared the result to a UTC column, which is the bug being fixed.
+    """
+    conn = _FakeConn()
+    start_utc, end_utc = dl.local_day_bounds_utc(TODAY, TODAY)
+    dl.fetch_transcripts(conn, {'database': 'DB1', 'schema': 'SCH1'}, start_utc, end_utc)
+
+    sql = conn.cur.sql
+    assert 'DATEADD' not in sql, "local-date arithmetic is back in the query"
+    assert 'CONVERT_TIMEZONE' not in sql, \
+        "per-row conversion defeats partition pruning; convert client-side instead"
+    assert '%(start_utc)s' in sql and '%(end_utc)s' in sql
+    assert '>=' in sql and '<' in sql, 'bounds must be half-open, not BETWEEN'
+    assert 'BETWEEN' not in sql.upper(), 'BETWEEN is inclusive and would double-count'
+
+    # the values bound are the UTC datetimes, not date strings
+    assert conn.cur.params == {'start_utc': datetime(2026, 9, 25, 4, 0),
+                               'end_utc': datetime(2026, 9, 26, 4, 0)}
+    assert all(isinstance(v, datetime) for v in conn.cur.params.values()), \
+        'binding strings re-introduces the implicit-cast ambiguity'
