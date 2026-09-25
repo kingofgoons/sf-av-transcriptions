@@ -86,8 +86,8 @@ graph TD
 `sf_config.init(session)` resolves in this order:
 
 1. **`TRANSCRIPTION_DEPLOY.PUBLIC.V_PROJECT_CONFIG`** — the authoritative projection of
-   `scripts/00_config.sql`. This is what keeps the dashboard, the notebook and the SQL
-   scripts on one authored source.
+   `scripts/00_config.sql`. This is what keeps the dashboard, the transcription payload and
+   the SQL scripts on one authored source.
 2. **Session context** — the app's own database/schema. Correct for location; object names
    fall back to defaults.
 3. **Hardcoded V2 fallback** — so a config outage degrades rather than breaking the app.
@@ -171,7 +171,7 @@ the following were verified empirically on 2026-08-19 against an owner's-rights 
 |---|---|---|
 | `SELECT` on tables/views | yes | |
 | `EXECUTE TASK` | **yes** | Absent from the documented allow-list, but works |
-| `CALL` a procedure | yes | Gate proc returns SKIPPED without launching a GPU |
+| `CALL` a procedure | yes | Verified against the gate proc. **Not an inspection** — `TRANSCRIBE_IF_NEW_FILES()` launches a GPU run whenever the backlog is non-empty |
 | `session.file.put_stream` | yes | The upload path |
 | `LIST` | yes | Permitted for Python handlers, unlike SQL/JS handlers |
 | `ALTER STAGE … REFRESH` | yes | DDL |
@@ -192,7 +192,7 @@ procedure; `READ, WRITE` on `AUDIO_VIDEO_STAGE`; `CREATE STREAMLIT` on the schem
 `READ` on `STREAMLIT_STAGE`.
 
 Deliberately **not** granted: `INSERT` on the run-events table (the app only reads
-progress; the notebook writes it), `READ SESSION`, anything on the compute pool.
+progress; the payload writes it), `READ SESSION`, anything on the compute pool.
 
 ### Ownership cannot be transferred
 
@@ -211,28 +211,53 @@ same account. Do not "simplify" the `--role` flag back to a `USE ROLE` statement
 `sf_pipeline` is the only module reaching outside `TRANSCRIPTION_RESULTS`. Nothing in it is
 cached — the point is a live view.
 
-The completeness percentage is a **measurement, not an estimate**: the notebook counts a
+The completeness percentage is a **measurement, not an estimate**: the payload counts a
 work unit only when it actually finishes, with no time interpolation. Units are
-`4 + (files × 4)`.
+`4 + (files × 4)` — four global phases (`STARTUP`, `DISCOVER`, `DOWNLOAD`, `PERSIST`) plus four
+steps per file. Verified live: 8 units for 1 file, 12 for 2, 20 for 4.
 
-### Hang detection
+`PHASE_TOTAL = 6` and the `4 + files*4` arithmetic are load-bearing in both directions —
+`sf_config.PHASE_TOTAL` and `V_TRANSCRIPTION_RUN_STATUS` must agree with the payload, so a
+change to the phase list is a three-file change.
 
-The notebook **cannot report its own clean exit**. The `snowbook` shutdown hang occurs
-*after* the last cell, during interpreter shutdown, so any code in the teardown cell runs
-on a hung run too. Its terminal state is therefore `CELLS_COMPLETE`, and distinguishing
-"exited" from "wedged" requires `TASK_HISTORY` — a `CELLS_COMPLETE` run whose task is still
-`EXECUTING` is the hang. **Never add a notebook-side `SUCCEEDED` emission**; it would be
-written on hung runs and hide the very thing it was meant to expose.
+### Terminal state and exit reporting
+
+**The payload reports its own clean exit; the notebook could not.** This reversed with the
+job-service port, and it is the single most important thing to understand in this section.
+
+- **Payload (`JOB_SERVICE`, default):** emits a terminal `SUCCEEDED` event as its last act
+  before closing the session. A headless script has no post-script shutdown phase in which to
+  wedge, so if `SUCCEEDED` is written, the process genuinely got to the end.
+- **Notebook (`NOTEBOOK`, rollback only):** **cannot** do this. The `snowbook` shutdown hang
+  occurs *after* the last cell, during interpreter shutdown, so any code in a teardown cell
+  runs on a hung run too. Its terminal state is therefore `CELLS_COMPLETE`, and distinguishing
+  "exited" from "wedged" requires `TASK_HISTORY` — a `CELLS_COMPLETE` run whose task is still
+  `EXECUTING` is the hang.
+
+> **Do not add a `SUCCEEDED` emission to the notebook.** It would be written on hung runs too
+> and hide the thing it was meant to expose. That restriction is specific to the notebook's
+> shutdown model and does **not** apply to the payload, where `SUCCEEDED` is deliberate and
+> required. An earlier revision of this file stated the prohibition unconditionally, which
+> would read today as an instruction to delete working code.
+
+Emitting `SUCCEEDED` is also what upgrades `WORK_COMPLETE_NOT_EXITED` from a routine, expected
+state into a genuine alarm: on the job-service path it now means the container has a **new**
+exit problem, not the known `snowbook` hang.
+
+`TASK_HISTORY` is still cross-checked on every poll. It is the independent confirmation that
+the container actually went away — the payload's own event says it intended to exit, and
+`TASK_HISTORY` says the task did.
 
 | `DERIVED_STATE` | Meaning |
 |---|---|
 | `STARTING` | Task is `EXECUTING` but nothing emitted yet — see below |
 | `RUNNING` | heartbeat fresh |
 | `FINISHING` | rows committed, container winding down |
-| `CELLS_COMPLETE` | all cells done; cross-checked against `TASK_HISTORY` |
-| `WORK_COMPLETE_NOT_EXITED` | **the hang** — data is safe, container wedged |
+| `SUCCEEDED` | payload reported a clean exit — the normal terminal state |
+| `CELLS_COMPLETE` | **notebook mode only**; all cells done, cross-checked against `TASK_HISTORY` |
+| `WORK_COMPLETE_NOT_EXITED` | data is safe, container wedged. Routine in notebook mode; **an alarm in job-service mode** |
 | `STALLED` | no heartbeat for `RUN_STALE_SECS` (600) |
-| `SUCCEEDED` / `FAILED` | terminal |
+| `FAILED` | terminal |
 
 The 600s threshold is validated against real data: the largest observed gap between
 heartbeats is 49s (one Whisper call), second largest 38s (Cortex). Re-check it if the
@@ -240,39 +265,67 @@ Whisper model is upsized — `large` is roughly 10x slower than `base`.
 
 ### `STARTING`: the pre-emit window
 
-`STARTING` is **not** a state the notebook reports — it is derived when the task is
-`EXECUTING` but no run has emitted anything yet. That window is real and long: the first
-`emit()` sits at line 147 of notebook cell 5, but `!pip install openai-whisper pandas` is at
-line 4 of the same cell, so nothing is reported until torch and Whisper finish installing.
-**Measured: 62s to first event on a warm pool; ~125s on a cold one.**
+`STARTING` is **not** a state the run reports — it is derived when the task is `EXECUTING` but
+no run has emitted anything yet. That window is real, because the container installs Whisper
+before the payload's first `emit()`: the spec runs
+`uv pip install --system --break-system-packages openai-whisper` and only then
+`python transcribe_job.py`, so nothing is reported until torch and Whisper finish installing.
+**Measured on the job-service path: 16-18s to first event on a warm pool, 110-116s on a cold
+one** (the notebook path was ~62s warm, ~125s cold).
 
 Without this state the panel showed the *previous* run's terminal card for minutes after a
 kickoff, which reads as "nothing happened" — or worse, as if the old run were the current
 one. When `STARTING`, the stale run's phase and unit counts are **suppressed**, because
 rendering "16 of 16 units (100%)" next to a run that has not begun is actively misleading.
 
-Distinguishing `STARTING` from the hang is subtle, because both are "task `EXECUTING`, newest
-run terminal". They are separated by **age, not state**: if the last heartbeat is *older* than
-the task's own elapsed time, that heartbeat cannot belong to this execution, so a new run is
-starting. Comparing the two elapsed counters avoids parsing timestamps across timezones.
-Equality is treated as the hang — flagging a hang wrongly is safer than hiding one.
+Distinguishing `STARTING` from a wedged container is subtle, because both are "task
+`EXECUTING`, newest run terminal". They are separated by **age, not state**: if the last
+heartbeat is *older* than the task's own elapsed time, that heartbeat cannot belong to this
+execution, so a new run is starting. Comparing the two elapsed counters avoids parsing
+timestamps across timezones. Equality is treated as the wedged case — flagging it wrongly is
+safer than hiding it.
 
 `STARTING` also blocks the kickoff button. `IS_ACTIVE` is false during this window, so keying
 only on `IS_ACTIVE` left the button live right after a kickoff. `ALLOW_OVERLAPPING_EXECUTION
 = FALSE` would reject the second run, so it was never dangerous — but the button appeared to
 do nothing, which is a poor way to discover that.
 
-### Reading a hang off the dashboard
+This is also why the launch is **synchronous**. `EXECUTE JOB SERVICE … ASYNC` would return
+immediately and let the task complete, which would drop `STATE = 'EXECUTING'` and collapse
+both `STARTING` and the wedged-container detection — the dashboard derives both from the task
+still running.
+
+### The three gate verdicts
+
+`TASK_HISTORY.RETURN_VALUE` carries one of three results, and the panel surfaces each:
+
+| Verdict | Meaning |
+|---|---|
+| `LAUNCHED` | New media found; a GPU run started |
+| `SKIPPED` | Backlog empty; nothing started |
+| `BLOCKED` | A run is already in flight; nothing started |
+
+`BLOCKED` was added with the job-service port because that path **drops the job service before
+creating it** (Snowflake rejects reuse of a job name, even a `DONE` one). Launching over a live
+run would therefore kill a transcription in progress, and since `persist()` writes once after
+every file completes, the whole batch would be lost.
+
+### Reading a wedged container off the dashboard
 
 The panel cross-checks `TASK_HISTORY` on **every** poll, so green `COMPLETE` is itself the
 all-clear — no manual query needed:
 
 | Card | Meaning |
 |---|---|
-| green `COMPLETE` | Cells done **and** the task returned. Clean. |
-| orange `HUNG (work saved)` | Cells done, task still `EXECUTING`. The hang. |
+| green `COMPLETE` | Work done **and** the task returned. Clean. |
+| orange `HUNG (work saved)` | Work done, task still `EXECUTING`. |
 
-Signature of a real hang, from the verified 2026-08-19 10:07 run (3 files):
+On the job-service path the orange card should never appear; if it does, it is a new defect
+rather than the known runtime hang, and the container is worth inspecting directly with
+`SYSTEM$GET_SERVICE_STATUS` before anything is restarted.
+
+In notebook mode it is expected. Signature of a real hang, from the verified 2026-08-19 10:07
+run (3 files):
 
 ```
 10:07:47  task starts, gate finds 3 new files
@@ -285,8 +338,9 @@ Signature of a real hang, from the verified 2026-08-19 10:07 run (3 files):
 
 Three numbers worth remembering:
 
-- **Normal teardown is ~11s** (clean run: last event 15:27:21, task returned 15:27:32). So
-  `CELLS_COMPLETE` with the task still running past ~60s is a hang, not slow shutdown.
+- **Normal teardown is ~11s** on the notebook path (clean run: last event 15:27:21, task
+  returned 15:27:32), and **5-9s** on the job-service path across seven runs. So a terminal
+  state with the task still running past ~60s is a wedge, not slow shutdown.
 - **The terminal error varies — do not key alerting on one code.** Two hangs on 2026-08-19 ended
   differently: 10:07 died at **1045s, error 604** "SQL execution canceled"; 15:52 ran the full
   timeout and died at **1802s, error 000630** "Statement reached its statement or warehouse
@@ -313,9 +367,9 @@ Deliberate, given this project's history of a ~230-credit runaway:
 ### Kickoff
 
 Uses `EXECUTE TASK`, which is asynchronous — it queues and returns. A synchronous `CALL` of
-the gate would run `EXECUTE NOTEBOOK` inline and hold the app's session for the entire
-transcription, bounded by the warehouse's 4-hour `STATEMENT_TIMEOUT` rather than the task's
-30-minute cap.
+the gate would run the launch statement inline (`EXECUTE JOB SERVICE`, or `EXECUTE NOTEBOOK` in
+rollback mode) and hold the app's session for the entire transcription, bounded by the
+warehouse's 4-hour `STATEMENT_TIMEOUT` rather than the task's 30-minute cap.
 
 **Concurrency authority is the task**, via `ALLOW_OVERLAPPING_EXECUTION = FALSE`. The UI
 check is advisory and racy: two viewers can pass it simultaneously. The platform is what
@@ -332,10 +386,10 @@ actually prevents a second concurrent run.
   in the directory table, so without it neither the backlog count nor the task gate can see
   the upload.
 - `overwrite=False` protects existing recordings.
-- **200 MB is a hard cap** on warehouse runtime, not configurable. 80 of 443 existing
-  recordings (18%) exceed it, the largest 1.7 GB. In-app upload is a convenience path, not
+- **200 MB is a hard cap** on warehouse runtime, not configurable. 86 of 497 existing
+  recordings (17%) exceed it, the largest 1.7 GB. In-app upload is a convenience path, not
   a replacement for `av.uploader`.
-- Filenames are validated against the notebook's `parse_filename_metadata()` contract,
+- Filenames are validated against the payload's `parse_filename_metadata()` contract,
   `YYYY-MM-DD HH-MM-SS_AccountName[_rest].ext`. A non-conforming name still transcribes but
   lands with `ACCOUNT_NAME` and `CALL_START_TS` NULL, so this warns rather than blocks.
 

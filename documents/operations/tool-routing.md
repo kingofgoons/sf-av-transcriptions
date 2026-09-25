@@ -48,6 +48,12 @@ Never assume a column exists from the table name — `DESCRIBE` or search first.
 
 ## Rule 4 — Notebooks use the notebook tools, never the file tools
 
+**Scope note:** the notebook is the **rollback** launch path, not the active engine. The
+transcription payload (`scripts/payload/transcribe_job.py`, `transcribe_functions.py`) is
+ordinary Python — edit it with `edit` / `multi_edit` and deploy it with
+`scripts/05_deploy_payload.sh`. This rule applies only when you are genuinely working on
+`audio_video_transcription.ipynb`.
+
 Editing `audio_video_transcription.ipynb` with `edit`, `multi_edit`, or `write` corrupts
 notebook JSON. Use `notebook_read`, `notebook_add_cell`, `notebook_edit_cell`,
 `notebook_delete_cell`. Call `notebook_add_cell` sequentially, never in parallel. Call
@@ -58,8 +64,9 @@ leaves the old body appended below the new content. This happened on 2026-08-18 
 a 161-line duplicated cell. Verify the cell after editing, or delete and re-add it.
 
 The local kernel is **not** the GPU Container Runtime, so local execution will not reproduce
-Whisper or GPU behavior. To test real pipeline behavior, deploy with
-`scripts/04_deploy_notebook.sh` and inspect telemetry via `scripts/08_telemetry_debug.sql`.
+Whisper or GPU behavior. To test real pipeline behavior, deploy the payload with
+`scripts/05_deploy_payload.sh` (or the notebook with `scripts/04_deploy_notebook.sh` in rollback
+mode) and inspect telemetry via `scripts/08_telemetry_debug.sql`.
 
 ## Rule 5 — `meeting-intel` is THIS project's own MCP server, not an outside source
 
@@ -119,3 +126,23 @@ Raw fd 2 output reaches the event table, which is why the `faulthandler` hang fo
 the interpreter's own `resource_tracker` warning arrives the same way. Note that
 `faulthandler` needs a real file descriptor — Snowflake notebooks replace `sys.stderr` with a
 capture proxy that has no `fileno()`, so resolve `sys.__stderr__` instead.
+
+### Job-service logs are a different path
+
+The above describes **notebook** container telemetry. A job service does not route through the
+event table the same way; read its stdout/stderr directly:
+
+```sql
+SELECT SYSTEM$GET_SERVICE_LOGS('TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIBE_JOB',
+                               0, 'main', 200);
+```
+
+Two practical limits. The output **truncates at roughly 4 KB**, so pull a bounded tail rather
+than expecting the full run, and it is only readable **while the service object still exists** —
+the gate drops `TRANSCRIBE_JOB` at the start of the next launch, and a task timeout removes it
+immediately. For anything you need to keep, the durable record is
+`TRANSCRIPTION_RUN_EVENTS`, which is append-only and survives the container.
+
+`SYSTEM$GET_SERVICE_STATUS` is the companion call for scheduling problems. A GPU-pool container
+that does not request a GPU never schedules at all: it sits `PENDING` indefinitely with only a
+`WARN` in the status payload and nothing in the logs, because the container never starts.
