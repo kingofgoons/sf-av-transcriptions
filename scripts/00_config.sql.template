@@ -129,6 +129,96 @@ SET SERVICE_USER = 'AV_UPLOADER_SERVICE_USER';
 SET PROJECT_TASK_TIMEOUT_MS = 1800000;              -- 30 min; EXECUTE NOTEBOOK is synchronous (blocks until notebook finishes)
 SET PROJECT_WH_STATEMENT_TIMEOUT = 14400;           -- Warehouse-level ceiling, left at 4h; the task timeout above is the binding limit
 
+--#############################################################################
+-- COMPUTE SIZING AND IDLE BEHAVIOUR
+--
+-- These live here, not inline in 02_setup.sql, because 02_setup.sql creates both
+-- objects with IF NOT EXISTS - which silently does NOTHING to an object that already
+-- exists. Values written only into the CREATE were therefore unenforced, and both
+-- had drifted by 2026-09-24:
+--
+--     GPU pool AUTO_SUSPEND_SECS   code: never set at all   account: 3600
+--     Warehouse AUTO_SUSPEND       code: 60                 account: 600
+--
+-- Neither drift was a decision. The pool value was simply the platform default, and
+-- `git log -S AUTO_SUSPEND_SECS` shows it was never once set in code - while
+-- agents.md has said "do not increase AUTO_SUSPEND_SECS on the GPU pool" the whole
+-- time. 02_setup.sql now ALTERs to these values on every run so re-running the script
+-- reconciles an existing deployment instead of leaving it adrift.
+--#############################################################################
+
+SET PROJECT_POOL_INSTANCE_FAMILY = 'GPU_NV_S';      -- May need changing by region
+SET PROJECT_POOL_MIN_NODES = 1;
+SET PROJECT_POOL_MAX_NODES = 3;
+
+-- 300s, down from the inherited 3600s default. Measured 2026-09-24: a GPU_NV_S
+-- node-hour bills ~0.60 credits, and a clean run is ~6.5 min of actual work - so at
+-- 3600s roughly 82% of each run's GPU cost was the pool idling AFTER the work
+-- finished (~0.60 credits of idle against ~0.065 of compute). Across 23 runs in 35
+-- days that is ~12.6 credits, which was the single largest controllable line item in
+-- the project - larger than the entire job-service port saves.
+--
+-- 300s is not arbitrary: a cold start costs ~105s (image pull) versus ~18s warm, so
+-- re-resuming costs ~0.015 credits while the shortened tail saves ~0.55 per run. Five
+-- minutes also comfortably spans a burst of uploads arriving together, which is the
+-- normal trigger pattern.
+--
+-- NOTE the failure mode this does NOT fix: AUTO_SUSPEND counts *idle* time only, and
+-- a hung notebook container leaves the pool non-idle, so a leaked node is unbounded
+-- regardless of this value. See documents/operations/runbook.md for the mandatory
+-- post-hang reclaim.
+SET PROJECT_POOL_AUTO_SUSPEND_SECS = 300;
+
+SET PROJECT_WH_SIZE = 'XSMALL';
+
+-- 600s, matching the account rather than the 60s the script used to claim. This is the
+-- one place where the DEPLOYED value was the better one and the code was corrected to
+-- match it, rather than the reverse.
+--
+-- Reason: Snowflake bills a 60-second minimum every time a warehouse resumes. This
+-- warehouse's dominant consumer is interactive Streamlit sessions (1,357 of 2,094
+-- exec-minutes over 35 days), where a user clicks every minute or two. At
+-- AUTO_SUSPEND = 60 that pattern pays the 60s minimum repeatedly on resume; staying
+-- warm for 600s is cheaper for the same work. Lowering this would look like a saving
+-- and cost more.
+SET PROJECT_WH_AUTO_SUSPEND = 600;
+
+--#############################################################################
+-- LAUNCH PATH  (added 2026-09-25)
+--
+-- The pipeline can run the transcription either as the GPU NOTEBOOK or as a
+-- headless JOB_SERVICE running scripts/payload/transcribe_job.py. PROJECT_LAUNCH_MODE
+-- selects which, and is read by 03_automate.sql when it BUILDS the gate procedure -
+-- not at runtime. Switching modes therefore requires re-running 03_automate.sql.
+--
+-- WHY THE PORT EXISTS: the notebook hangs after its last cell (the snowbook shutdown
+-- hang) and cannot report its own clean exit. Measured 2026-09-24: 1 hang in 2 notebook
+-- runs, tail 145s+ on the hung one against 5s clean. The same workload as a job service
+-- ran 4 for 4 clean with a 5s tail every time. A hung container also holds a GPU node
+-- indefinitely, because AUTO_SUSPEND counts idle time only.
+--
+-- ROLLBACK: set PROJECT_LAUNCH_MODE = 'NOTEBOOK', ./publish_config.sh, re-run
+-- 03_automate.sql. The notebook is deliberately NOT deleted by this port.
+--#############################################################################
+
+SET PROJECT_LAUNCH_MODE = 'JOB_SERVICE';            -- 'JOB_SERVICE' or 'NOTEBOOK'
+
+SET PROJECT_STAGE_PAYLOAD = 'PAYLOAD_STAGE';        -- Holds transcribe_job.py + spec; deployed by 05_deploy_payload.sh
+SET PROJECT_JOB_SPEC_FILE = 'transcribe_job_spec.yaml';
+
+-- ONE stable job name, DROPped immediately before each launch. Measured 2026-09-25:
+-- EXECUTE JOB SERVICE against an existing DONE job fails with "Object ... already
+-- exists", so a name must be freed before reuse. The alternative - a generated name per
+-- run - is worse: nothing would ever clean them up, so a handful of runs a day becomes
+-- ~1500 job objects a year in SHOW SERVICES. The durable audit trail is
+-- TRANSCRIPTION_RUN_EVENTS, and the single surviving job object is always the most
+-- recent one, which is the one worth debugging.
+SET PROJECT_JOB_NAME = 'TRANSCRIBE_JOB';
+
+-- Full tag REQUIRED. A bare ':2.9' does not resolve and fails instantly, provisioning
+-- nothing. Keep in step with scripts/payload/transcribe_job_spec.yaml.template.
+SET PROJECT_JOB_IMAGE = '/snowflake/images/snowflake_images/container_runtime/gpu_x86_64:2.9.0';
+
 -- Integration names (these are account-level, so include prefix to avoid conflicts)
 SET PROJECT_ALLOW_ALL_INTEGRATION = 'transcription_allow_all_integration_V2';
 SET PROJECT_PYPI_INTEGRATION = 'transcription_pypi_access_integration_V2';
@@ -144,6 +234,8 @@ SET PROJECT_PYPI_RULE = 'pypi_network_rule_V2';
 SET FQ_SCHEMA   = $PROJECT_DB || '.' || $PROJECT_SCHEMA;
 SET FQ_STAGE_AV = $FQ_SCHEMA || '.' || $PROJECT_STAGE_AV;
 SET FQ_STAGE_NB = $FQ_SCHEMA || '.' || $PROJECT_STAGE_NB;
+SET FQ_STAGE_PAYLOAD = $FQ_SCHEMA || '.' || $PROJECT_STAGE_PAYLOAD;
+SET FQ_JOB      = $FQ_SCHEMA || '.' || $PROJECT_JOB_NAME;
 SET FQ_NOTEBOOK = $FQ_SCHEMA || '.' || $PROJECT_NOTEBOOK;
 SET FQ_RESULTS  = $FQ_SCHEMA || '.' || $PROJECT_RESULTS_TABLE;
 SET FQ_STREAM   = $FQ_SCHEMA || '.' || $PROJECT_STREAM;
@@ -198,6 +290,11 @@ BEGIN
         ''' || $PROJECT_NOTEBOOK          || ''' AS PROJECT_NOTEBOOK,
         ''' || $PROJECT_STAGE_AV          || ''' AS PROJECT_STAGE_AV,
         ''' || $PROJECT_STAGE_NB          || ''' AS PROJECT_STAGE_NB,
+        ''' || $PROJECT_STAGE_PAYLOAD     || ''' AS PROJECT_STAGE_PAYLOAD,
+        ''' || $PROJECT_LAUNCH_MODE       || ''' AS PROJECT_LAUNCH_MODE,
+        ''' || $PROJECT_JOB_NAME          || ''' AS PROJECT_JOB_NAME,
+        ''' || $PROJECT_JOB_SPEC_FILE     || ''' AS PROJECT_JOB_SPEC_FILE,
+        ''' || $PROJECT_JOB_IMAGE         || ''' AS PROJECT_JOB_IMAGE,
         ''' || $PROJECT_RESULTS_TABLE     || ''' AS PROJECT_RESULTS_TABLE,
         ''' || $PROJECT_RUN_EVENTS_TABLE  || ''' AS PROJECT_RUN_EVENTS_TABLE,
         ''' || $PROJECT_RUN_STATUS_VIEW   || ''' AS PROJECT_RUN_STATUS_VIEW,
@@ -208,11 +305,20 @@ BEGIN
         ''' || $SERVICE_ROLE              || ''' AS SERVICE_ROLE,
         ' || $PROJECT_RUN_STALE_SECS      || '  AS RUN_STALE_SECS,
         ' || $PROJECT_TASK_TIMEOUT_MS     || '  AS TASK_TIMEOUT_MS,
+        ''' || $PROJECT_POOL_INSTANCE_FAMILY || ''' AS POOL_INSTANCE_FAMILY,
+        ' || $PROJECT_POOL_MIN_NODES      || '  AS POOL_MIN_NODES,
+        ' || $PROJECT_POOL_MAX_NODES      || '  AS POOL_MAX_NODES,
+        ' || $PROJECT_POOL_AUTO_SUSPEND_SECS || '  AS POOL_AUTO_SUSPEND_SECS,
+        ''' || $PROJECT_WH_SIZE           || ''' AS WH_SIZE,
+        ' || $PROJECT_WH_AUTO_SUSPEND     || '  AS WH_AUTO_SUSPEND,
+        ' || $PROJECT_WH_STATEMENT_TIMEOUT || '  AS WH_STATEMENT_TIMEOUT,
         ''' || $FQ_SCHEMA                 || ''' AS FQ_SCHEMA,
         ''' || $FQ_RESULTS                || ''' AS FQ_RESULTS,
         ''' || $FQ_RUN_EVENTS             || ''' AS FQ_RUN_EVENTS,
         ''' || $FQ_RUN_STATUS             || ''' AS FQ_RUN_STATUS,
         ''' || $FQ_STAGE_AV               || ''' AS FQ_STAGE_AV,
+        ''' || $FQ_STAGE_PAYLOAD          || ''' AS FQ_STAGE_PAYLOAD,
+        ''' || $FQ_JOB                    || ''' AS FQ_JOB,
         ''' || $FQ_TASK                   || ''' AS FQ_TASK,
         ''' || $FQ_GATE_PROC              || ''' AS FQ_GATE_PROC,
         CURRENT_TIMESTAMP()                      AS REFRESHED_AT';

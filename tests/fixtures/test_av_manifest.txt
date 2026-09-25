@@ -1,0 +1,25 @@
+# Test AV files staged for the job-service port validation.
+# Generated 2026-09-24 14:29:49 EDT from AUDIO_VIDEO_STAGE_FILES/
+#
+# These are REAL recordings re-staged under _TESTnn suffixes so the pipeline treats
+# them as new work (dedup is on bare filename). They are disposable: remove them and
+# everything derived from them with scripts/cleanup_test_artifacts.sql.
+#
+# Cleanup keys on the regex _TEST[0-9]{2}\.(mp3|mp4)$ - verified 2026-09-24 to match
+# 0 of the 377 pre-existing stage files and 0 of the 493 pre-existing transcripts.
+# The one pre-existing name containing 'TEST' is '...AI_Brain.Testing.sync.mp4', which
+# the anchored pattern correctly excludes.
+#
+2025-11-07 13-31-36_Kargo_Signal.Studio.sync.with.PS.and.Kargo_TEST13.mp3
+2025-11-18 16-13-46_Mediaocean_innovid_MongoDb.migration.sync_TEST12.mp4
+2026-01-27 14-21-08_Snowflake.Connect-AI_section04_hex_TEST11.mp4
+2026-02-16 11-33-53_Kargo_internal_Kortado.sync_TEST10.mp3
+2026-03-04 15-12-55_Innovid_Mediaocean_internal_sync.with.Adam.on.BCE.and.BCDR.estimates_TEST09.mp4
+2026-03-11 12-02-28_Bridgewater.Associates_internal_sync.on.unstructured.data.use-case_TEST08.mp3
+2026-03-17 10-22-35_Bridgewater.Associates_unstructured.data.sync.last10min_TEST07.mp4
+2026-03-20 10-32-48_2-2_Jack.McCarthy.TJ.Rich_IAC_Care.com_Angi_TEST06.mp3
+2026-05-07 13-27-20_Moodys_Sigma.demo.to.Moodys_TEST05.mp3
+2026-05-28 09-13-27_internal_TJ.weekly.meeting_TEST04.mp4
+2026-07-02 10-17-02_internal_skip-level.meeting.with.Bo.and.Rob.Silva_1_TEST03.mp4
+2026-08-06 14-02-24_Mediaocean_Innovid_Summit.in.30.to.Data.Science.Team_TEST02.mp4
+2026-09-08 13-01-21_Kargo_sync.with.PS.on.Sales.AIOps_AutoRFI_TEST01.mp4

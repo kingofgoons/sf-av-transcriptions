@@ -1,0 +1,59 @@
+# Service spec for the headless transcription payload.
+#
+# TEMPLATE, NOT THE DEPLOYED FILE. scripts/05_deploy_payload.sh substitutes the
+# double-underscore tokens below from V_PROJECT_CONFIG and uploads the result as
+# transcribe_job_spec.yaml. Do not upload this file directly, and do not hand-edit the
+# rendered copy on the stage: the next deploy overwrites it, and the values would
+# silently disagree with 00_config.sql.
+#
+# WHY A FILE ON A STAGE, NOT AN INLINE SPECIFICATION
+#   The gate procedure launches this with FROM @stage SPECIFICATION_FILE = '...'. An inline
+#   FROM SPECIFICATION $$...$$ cannot work there: a procedure body is itself a quoted
+#   string, and Snowflake supports only $$ as a dollar-quote tag, so the nesting has no
+#   valid delimiter ($body$ fails to parse). A staged file is also the better answer
+#   because it is version-controlled.
+#
+# THREE THINGS THAT WILL BITE, all measured 2026-09-25:
+#
+#   1. The GPU request below is MANDATORY. Omitting resources.requests leaves the job
+#      PENDING forever on a GPU pool, with only a WARN buried in
+#      SYSTEM$GET_SERVICE_STATUS - no error, no failure, no timeout. A spec missing it is
+#      indistinguishable from the very hang this port exists to eliminate.
+#
+#   2. NO COLONS in any command string. YAML reads `- echo "text: more"` as a mapping and
+#      fails with a deserialization error pointing at command[2]. That failure happens at
+#      LAUNCH time, after the gate has already decided there is work to do.
+#
+#   3. uv, not pip. This image enforces PEP 668, so `pip install` fails with
+#      "externally-managed-environment". uv pip install --system --break-system-packages
+#      is the form that works.
+#
+# The image tag must be the full tag. A bare ':2.9' does not resolve and fails instantly,
+# provisioning nothing.
+spec:
+  containers:
+  - name: main
+    image: __JOB_IMAGE__
+    resources:
+      requests:
+        nvidia.com/gpu: 1
+      limits:
+        nvidia.com/gpu: 1
+    env:
+      PROJECT_DB: __PROJECT_DB__
+      PROJECT_SCHEMA: __PROJECT_SCHEMA__
+      PROJECT_WH: __PROJECT_WH__
+      PROJECT_STAGE_AV: __FQ_STAGE_AV__
+      PROJECT_RESULTS_TABLE: __PROJECT_RESULTS_TABLE__
+      PROJECT_RUN_EVENTS_TABLE: __PROJECT_RUN_EVENTS_TABLE__
+      WHISPER_MODEL: base
+    volumeMounts:
+      - name: payload
+        mountPath: /opt/payload
+    command:
+      - /bin/bash
+      - -c
+      - 'set -e; uv pip install --system --break-system-packages --quiet openai-whisper; cd /opt/payload; python transcribe_job.py'
+  volumes:
+    - name: payload
+      source: "@__FQ_STAGE_PAYLOAD__"

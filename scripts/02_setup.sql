@@ -48,6 +48,12 @@
 --   Likewise, changing MIN/MAX_NODES or INSTANCE_FAMILY here does not resize an
 --   existing compute pool - use ALTER COMPUTE POOL.
 --
+--   AS OF 2026-09-24 this is partly addressed: the warehouse and compute pool now have
+--   explicit reconciling ALTER statements after their CREATE, so re-running this script
+--   converges a live deployment on 00_config.sql for sizing and idle behaviour. Tables
+--   and INSTANCE_FAMILY still do not self-reconcile, deliberately - both are
+--   destructive or node-replacing operations.
+--
 -- Object names come from 00_config.sql, so pointing PROJECT_DB at a new name and
 -- re-running is how you create a parallel deployment.
 --#############################################################################
@@ -57,11 +63,24 @@ EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 USE ROLE SYSADMIN;
 
 -- Create warehouse, database, and schema for transcription project
+-- Sizing and idle behaviour come from 00_config.sql - see the COMPUTE SIZING block there
+-- for why each value is what it is. The ALTER below is what actually enforces them.
 CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER($PROJECT_WH)
-  WAREHOUSE_SIZE = 'XSMALL'
-  AUTO_SUSPEND = 60
+  WAREHOUSE_SIZE = $PROJECT_WH_SIZE
+  AUTO_SUSPEND = $PROJECT_WH_AUTO_SUSPEND
   AUTO_RESUME = TRUE
-  STATEMENT_TIMEOUT_IN_SECONDS = 14400;  -- 4 hours: EXECUTE NOTEBOOK blocks until completion
+  STATEMENT_TIMEOUT_IN_SECONDS = $PROJECT_WH_STATEMENT_TIMEOUT;
+
+-- RECONCILE. `CREATE ... IF NOT EXISTS` above is a no-op against an existing warehouse,
+-- so without this the config values are aspirational: the script would claim
+-- AUTO_SUSPEND = 60 while the account sat at 600 for months, which is exactly what
+-- happened until 2026-09-24. Re-running this script must converge a live deployment on
+-- the config, not just create a correct one from scratch.
+ALTER WAREHOUSE IDENTIFIER($PROJECT_WH) SET
+  WAREHOUSE_SIZE = $PROJECT_WH_SIZE
+  AUTO_SUSPEND = $PROJECT_WH_AUTO_SUSPEND
+  AUTO_RESUME = TRUE
+  STATEMENT_TIMEOUT_IN_SECONDS = $PROJECT_WH_STATEMENT_TIMEOUT;
 
 -- STATEFUL: holds the schema, stages and transcripts. IF NOT EXISTS, never REPLACE.
 CREATE DATABASE IF NOT EXISTS IDENTIFIER($PROJECT_DB);
@@ -90,12 +109,25 @@ USE ROLE ACCOUNTADMIN;
 -- Create GPU compute pool for Whisper transcription.
 -- IF NOT EXISTS rather than DROP + CREATE: dropping the pool kills any in-flight
 -- transcription, and agents.md forbids dropping it without first confirming none is
--- running. To change MIN/MAX_NODES or INSTANCE_FAMILY on an existing pool, use
--- ALTER COMPUTE POOL instead of re-running this script.
+-- running.
+--
+-- Sizing and idle behaviour come from 00_config.sql. The ALTER below is what enforces
+-- them - see the note there. AUTO_SUSPEND_SECS was absent from this DDL entirely until
+-- 2026-09-24, so the pool ran on the platform default of 3600s while agents.md said to
+-- keep it low. That cost roughly 12.6 credits over 35 days.
 CREATE COMPUTE POOL IF NOT EXISTS IDENTIFIER($PROJECT_COMPUTE_POOL)
-        MIN_NODES = 1
-        MAX_NODES = 3
-        INSTANCE_FAMILY = GPU_NV_S; -- May need to change this based on region
+        MIN_NODES = $PROJECT_POOL_MIN_NODES
+        MAX_NODES = $PROJECT_POOL_MAX_NODES
+        AUTO_SUSPEND_SECS = $PROJECT_POOL_AUTO_SUSPEND_SECS
+        INSTANCE_FAMILY = $PROJECT_POOL_INSTANCE_FAMILY;
+
+-- RECONCILE. Safe on a running pool: these three properties do not restart nodes or
+-- interrupt in-flight work. INSTANCE_FAMILY is deliberately NOT altered here - changing
+-- it requires replacing nodes, so it stays a manual, deliberate operation.
+ALTER COMPUTE POOL IDENTIFIER($PROJECT_COMPUTE_POOL) SET
+        MIN_NODES = $PROJECT_POOL_MIN_NODES
+        MAX_NODES = $PROJECT_POOL_MAX_NODES
+        AUTO_SUSPEND_SECS = $PROJECT_POOL_AUTO_SUSPEND_SECS;
 
 -- Create network rules for external access (fully qualified with variables)
 -- Note: Network rules live in the database/schema, integrations are account-level
@@ -140,7 +172,7 @@ CREATE OR REPLACE FILE FORMAT CSVFORMAT
     FIELD_OPTIONALLY_ENCLOSED_BY = '"';
 
 -- Create stages.
--- Both are STATEFUL and use IF NOT EXISTS:
+-- All are STATEFUL and use IF NOT EXISTS:
 --   NOTEBOOK_STAGE   holds the deployed .ipynb and backs the notebook's versions;
 --                    replacing it breaks VERSION$n history (and any rollback point).
 --   AUDIO_VIDEO_STAGE holds the uploaded media (325 files as of 2026-08-18).
@@ -148,6 +180,32 @@ CREATE STAGE IF NOT EXISTS IDENTIFIER($PROJECT_STAGE_NB) DIRECTORY=(ENABLE=true)
 CREATE STAGE IF NOT EXISTS IDENTIFIER($PROJECT_STAGE_AV)
     DIRECTORY = (ENABLE = TRUE)
     ENCRYPTION=(TYPE='SNOWFLAKE_SSE'); -- to store audio/video files for transcription
+
+--   PAYLOAD_STAGE    holds scripts/payload/transcribe_job.py, transcribe_functions.py and
+--                    the rendered service spec. Deployed by scripts/05_deploy_payload.sh;
+--                    read by the gate procedure via SPECIFICATION_FILE, and mounted into
+--                    the container as a volume.
+--
+-- DIRECTORY is enabled to match the live stage. Nothing queries DIRECTORY() on it, but
+-- CREATE ... IF NOT EXISTS is a NO-OP against an existing stage, so declaring the
+-- opposite here would be permanent, unfixable drift rather than a correction.
+CREATE STAGE IF NOT EXISTS IDENTIFIER($PROJECT_STAGE_PAYLOAD) DIRECTORY=(ENABLE=true);
+
+-- Reconciling ownership transfer, for the same reason 02_setup ALTERs the warehouse and
+-- compute pool rather than trusting their CREATE: values that exist only inside a
+-- CREATE ... IF NOT EXISTS are never enforced on an already-deployed object.
+--
+-- This stage was created ad hoc during the job-service port spike (2026-09-24) and was
+-- therefore ACCOUNTADMIN-owned, while AUDIO_VIDEO_STAGE and NOTEBOOK_STAGE are both
+-- SYSADMIN-owned. That mattered: the gate procedure runs as SYSADMIN and reads the spec
+-- from this stage, and SYSADMIN had NO privilege on it at all, so the launch would have
+-- failed at runtime with a stage that looked perfectly healthy.
+--
+-- Harmless no-op on a fresh deployment, where the CREATE above already ran as SYSADMIN.
+USE ROLE ACCOUNTADMIN;
+GRANT OWNERSHIP ON STAGE IDENTIFIER($PROJECT_STAGE_PAYLOAD)
+    TO ROLE SYSADMIN COPY CURRENT GRANTS;
+USE ROLE SYSADMIN;
 
 -- Create table to store transcription results.
 -- STATEFUL: 441 transcripts / 250 hours of audio as of 2026-08-18. IF NOT EXISTS.

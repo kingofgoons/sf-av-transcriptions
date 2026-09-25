@@ -194,20 +194,74 @@ The uploader, the task, and the gate logic are all unchanged in behaviour. Only 
 
 ## Implementation steps
 
-### 1. Spike: validate every assumption (do this first, before writing the payload)
+### 1. Spike: validate every assumption — COMPLETE 2026-09-24, ALL GATES PASS
 
-Run a throwaway `EXECUTE JOB SERVICE` on `TRANSCRIPTION_GPU_POOL_V2` using the snowbooks GPU image, with `TRANSCRIPTION_PYPI_ACCESS_INTEGRATION_V2` and `TRANSCRIPTION_ALLOW_ALL_INTEGRATION_V2` attached, that prints:
+Run against `TRANSCRIPTION_GPU_POOL_V2` as three throwaway job services
+(`SPIKE_PROBE_02`, `SPIKE_FULL_01`, `SPIKE_WHISPER_01` — retained 30 days as evidence).
 
-- `sys.version` (expect 3.10, matching the notebook)
-- `shutil.which('ffmpeg')`, `ffmpeg -version`, `shutil.which('ffprobe')`
-- `torch.cuda.is_available()`, `torch.cuda.get_device_name(0)`
-- OAuth connection working: `SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE(), COUNT(*) FROM TRANSCRIPTION_RESULTS`
-- Contents of the mounted `AUDIO_VIDEO_STAGE` volume
-- Whether `pip install openai-whisper` succeeds and how long it takes
+**The image path was the one genuinely unknown, and the plan had it wrong.** The notebook's
+`runtime_name` is `SYSTEM$GPU_RUNTIME` — a *named notebook runtime*, not an image URI — and
+system-managed service specs return an empty `spec` column, so the image cannot be read off the
+existing notebook. It had to be found by probing. The answer:
 
-Also confirm log retrieval works via `SYSTEM$GET_SERVICE_LOGS` and that stdout reaches `SNOWFLAKE.TELEMETRY.EVENTS` for durable logs.
+```
+/snowflake/images/snowflake_images/container_runtime/gpu_x86_64:2.9.0
+```
 
-If ffmpeg is absent in this image (contradicting the notebook evidence), stop and reassess — options are a pip wheel bundling a static binary, a staged static binary, or a Custom Runtime Environment.
+Bare `:2.9` does **not** resolve; the tag needs the patch level. A wrong tag fails instantly with
+`Image ... not found` and provisions nothing, so probing tags is free.
+
+This is the **Container Runtime** image, not the snowbooks notebook image — a better target than the
+plan assumed. Note `snowbooks 1.76.10rc1` is still *installed* in it, so the safety rule stands:
+never invoke `python -m snowbook.web.cli`. Being present is harmless; being invoked is the hang.
+
+**Measured results:**
+
+| Check | Result | Gate |
+|---|---|---|
+| `sys.version` | 3.10.19 | PASS — matches notebook |
+| `which ffmpeg` | `/usr/bin/ffmpeg`, **6.1.1**-3ubuntu5 | PASS — 6.x as required |
+| `which ffprobe` | `/usr/bin/ffprobe` | PASS |
+| `torch.cuda.is_available()` | True, **NVIDIA A10G** | PASS |
+| OAuth session | role + `TRANSCRIPTION_WH_V2`, `COUNT(*) = 493` | PASS — matches live count |
+| AV stage volume mount | 377 media files, 378 entries | PASS — matches `LIST` exactly |
+| `SYSTEM$GET_SERVICE_LOGS` | full stdout retrieved | PASS |
+| Whisper install | `uv pip install --system --break-system-packages` → rc=0, **1s** | PASS *after fix* |
+| `whisper.load_model('base')` | **4.7s**, `cuda:0`, 279.4 MB allocated | PASS |
+
+**`pip install` fails in this image and the fix is mandatory.** Plain `pip install openai-whisper`
+exits 1 with PEP 668 `This environment is externally managed / managed by uv`. The payload must use
+`uv pip install --system --break-system-packages`, or bake the dependency into a CRE. This would
+have failed the first real run otherwise.
+
+**Startup is far better than the notebook, which changes the budgets and the dashboard copy:**
+
+| | Notebook | Job service (measured) |
+|---|---|---|
+| Cold, first image pull | 60-180s | **105s** (`SPIKE_FULL_01`) |
+| Warm | 60-180s | **18s** (`SPIKE_WHISPER_01`, install + model load + exit) |
+
+279.4 MB CUDA allocated after model load corroborates the notebook's \~287 MB figure, so the model
+footprint is unchanged — the improvement is all install/startup overhead.
+
+**Two risks the spike surfaced that were not in the plan:**
+
+1. **`torch` is 2.9.1+cu129 here versus 2.6.0+cu126 in the notebook runtime.** A two-minor-version
+   jump under Whisper can change transcription output. This does not break the port, but it means
+   **transcript text is not guaranteed byte-identical to the notebook's**, so task 4's 23-column
+   diff must treat `TRANSCRIPT`, `SRT_*` and segment boundaries as *expected to differ slightly*
+   rather than exact. Pin the comparison to structure and language detection, not exact text. If
+   exact parity matters, pin torch in the payload install.
+2. **All three spike jobs reached `DONE` and exited cleanly**, with no forced exit and no phantom
+   session. That is the first direct evidence this launch path exits — but none ran the
+   transcription workload, so it is *not* evidence about the hang. Do not over-read it.
+
+### 1b. Remaining spike item — launch site (was task 2)
+
+Still unverified: whether `EXECUTE JOB SERVICE` is permitted inside an `EXECUTE AS OWNER`
+procedure. Covered by task 2 below; the spike deliberately launched as `ACCOUNTADMIN` from a
+worksheet, which proves the mechanism but not the production caller.
+
 
 ### 2. Decide the launch site
 
@@ -217,6 +271,31 @@ Test `EXECUTE JOB SERVICE` from inside an `EXECUTE AS OWNER` procedure.
 - If rejected: refactor so the gate procedure only **decides** (returns `LAUNCH` or `SKIP` plus the file count) and the **task body** performs `EXECUTE JOB SERVICE`. Task bodies run as the task owner and are not bound by the stored-procedure allow-list. This keeps the gate logic in one place and avoids granting the uploader's service role privileges on the compute pool.
 
 Prefer the task-body variant if there is any doubt; it is more robust and does not change the security model.
+
+**RESOLVED — `EXECUTE JOB SERVICE` IS permitted inside `EXECUTE AS OWNER`.** Take the first branch:
+swap `EXECUTE NOTEBOOK` for `EXECUTE JOB SERVICE` inside `TRANSCRIBE_IF_NEW_FILES()`. The
+task-body refactor is not needed, so the security model does not change.
+
+Evidence: `SPIKE_JOB_IN_PROC()` (`EXECUTE AS OWNER`, ACCOUNTADMIN) ran a synchronous
+`EXECUTE JOB SERVICE` to completion and the container's own stdout came back via
+`SYSTEM$GET_SERVICE_LOGS` — proof the container executed, not merely that the service was created.
+The documented allow-list is therefore not predictive here, exactly as this task suspected.
+
+Three mechanics this spike pinned down, all of which task 5 depends on:
+
+- **Use `FROM @stage SPECIFICATION_FILE = '...'`, not inline `FROM SPECIFICATION $$...$$`.** A
+  procedure body is itself a quoted string and Snowflake supports only `$$` as a dollar-quote tag
+  (`$body$` fails to parse), so an inline spec cannot be nested. A spec file on a stage is also the
+  better answer: it is version-controllable. Task 5 should author
+  `scripts/payload/transcribe_job_spec.yaml` and deploy it to `@PAYLOAD_STAGE`.
+- **YAML colon trap.** `- echo "spike: text"` fails with a deserialization error pointing at
+  `command[2]`, because `: ` makes YAML read the scalar as a mapping. Quote any command string
+  containing a colon. The real payload command has none today, but any added `echo` with a colon
+  would break the spec at launch time — after the gate has already decided to run.
+- **A GPU-pool container must request a GPU or it never schedules.** Omitting
+  `resources.requests.nvidia.com/gpu` left the job `PENDING` indefinitely with only a `WARN` in
+  `SYSTEM$GET_SERVICE_STATUS` — no failure, no error, no timeout. A spec that forgets this looks
+  like a hang rather than a misconfiguration.
 
 ### 3. Extract the headless payload
 
@@ -359,7 +438,46 @@ boundary.
 - A headless script can also emit a **final** post-cleanup snapshot, which the notebook cannot
   (its hang is after the last cell). Add one immediately before exit.
 
+### 4d. Update the Streamlit dashboard — REQUIRED, three strings become FALSE
+
+Task 4b covers keeping the *data* flowing to `V_TRANSCRIPTION_RUN_STATUS`. This covers the
+dashboard's own logic and copy, which encode notebook-specific assumptions that the port
+invalidates. None of these throw an error — they just quietly start lying to the operator.
+
+All three are in `streamlit/sf_pipeline.py`:
+
+1. **The `STARTING` blurb hardcodes the notebook's startup window** (around line 176):
+
+   > "The notebook installs Whisper before it can report progress, so the first update takes
+   > roughly 60-180s (longer on a cold GPU pool)."
+
+   Measured job-service startup is **18s warm, 105s cold**. Reword, and drive the number from
+   config rather than prose if possible. An operator who waits 3 minutes for a run that started
+   18 seconds ago will conclude the pipeline is broken.
+
+2. **`render_controls`'s comment and reasoning about the kickoff block** (around line 338) says
+   `IS_ACTIVE` is false during "the 60-180s before the notebook..." The *logic* is sound and
+   launch-agnostic — `is_active = IS_ACTIVE or state == 'STARTING'` — but verify the block still
+   holds across an 18-second window. This is the one real behavioural risk: the `STARTING`
+   detection compares `SECONDS_SINCE_HEARTBEAT > ELAPSED_SEC`, and with an 18s pre-emit window
+   there is far less margin. Confirm the button does not become briefly clickable mid-run, which
+   would let a second `EXECUTE TASK` fire.
+
+3. **The `WORK_COMPLETE_NOT_EXITED` blurb blames snowbook** (around line 183):
+
+   > "Known snowbook shutdown hang - transcripts are already saved."
+
+   After the port this diagnosis is wrong by construction. Per task 4b the payload emits a real
+   terminal `SUCCEEDED`, so this state appearing means **the job service has its own exit
+   problem** — a new, unknown fault, not a known benign one. Reword so it reads as an alert
+   rather than a reassurance.
+
+Also confirm the panel renders `RUN_SOURCE = 'JOB_SERVICE'` gracefully. It is displayed as free
+text at line 239, so it should, but check rather than assume.
+
 ### 5. Wire the launch path
+
+
 
 
 
@@ -380,7 +498,311 @@ Retire the headless notebook path while keeping the notebook for interactive use
 **Do not delete the `EXECUTE NOTEBOOK` path in this step.** See the rollback section below; it is
 retired only after the port has earned it.
 
-## Rollback
+## End-to-end test plan
+
+Tiered by cost and by blast radius. **Nothing is committed to git until Tier 3 passes**, per the
+2026-09-24 instruction. Tiers 0-1 need nothing from the operator; Tiers 2-4 have explicit HUMAN
+gates, marked inline.
+
+**HUMAN 1 — DELIVERED 2026-09-24. 13 files staged locally in `AUDIO_VIDEO_STAGE_FILES/`.**
+
+Real recordings re-staged under `_TESTnn` suffixes so the dedup gate treats them as new
+work. **311 minutes of audio total**, 4.2 to 45.0 minutes each — a useful spread, and longer
+than the 5-10 min originally requested, which is fine and arguably better.
+
+| | |
+|---|---|
+| Count | 13 (8 `.mp4`, 5 `.mp3` — not all `.mp3` as first reported) |
+| Audio | 311 min total; shortest `TEST12` 4.2 min, longest `TEST13` 45.0 min |
+| Naming | `DATE ACCOUNT_description_TESTnn.ext` — conforms, so `ACCOUNT_NAME` parses correctly |
+| Manifest | `tests/fixtures/test_av_manifest.txt` — the authoritative list |
+| Cleanup | `scripts/cleanup_test_artifacts.sql` — dry-run by default |
+
+**Expected runtime is much lower than a naive estimate.** Do not use "2-4 min per 8-min
+recording" — the real anchor is the observed 10-file / 18,202s-audio / 978s run, a ratio of
+**0.054x realtime**. So 311 min of audio is roughly **17 minutes of GPU across the whole
+campaign**, and a 3-file run of \~120 min audio is \~6.5 min — comfortably inside the
+30-minute `USER_TASK_TIMEOUT_MS`. A naive 0.3x estimate would have predicted 90+ minutes and
+falsely suggested the timeout needed raising.
+
+**Cleanup is keyed on the anchored regex `_TEST[0-9]{2}\.(mp3|mp4)$`, verified 2026-09-24:**
+
+- Matches 0 of 377 pre-existing stage files and 0 of 493 pre-existing transcripts.
+- `LIKE '%TEST%'` would have caught the real permanent transcript
+  `...DoubleVerify_onsite.AI_Brain.Testing.sync.mp4`. The anchored form excludes it, along
+  with `TESTING01`, single-digit `TEST1`, and non-media extensions — all 9 cases verified
+  against the live database before any upload.
+
+**The run-events predicate is the subtle part.** `RUN_EVENTS` has no per-row `FILE_NAME`,
+only `CURRENT_FILE`, which is NULL on run-level events. Deleting rows by `CURRENT_FILE`
+would strip per-file rows and orphan the run-level ones. Deleting whole `RUN_ID`s that
+merely *touched* a test file would destroy the history of a **mixed** run — real
+operational history lost to clean up disposable data. So the script deletes a `RUN_ID`
+only when **every** non-null `CURRENT_FILE` in that run matches the test pattern, and
+reports mixed runs as deliberately kept.
+
+The cleanup script clones `TRANSCRIPTION_RESULTS` to `TR_PRECLEANUP_BACKUP` before any
+`DELETE`, unconditionally. Stage `REMOVE` is deliberately left manual, because `REMOVE`
+takes a literal pattern and cannot be gated on the dry-run flag — automating it would fire
+it on every report run.
+
+### AV files required — original estimate, retained for reference
+
+As of 2026-09-24 the stage holds **377 files and all 377 are already transcribed**, so the dedup
+gate returns `SKIP` and the pipeline has nothing to do. Testing the real path therefore needs new
+files. Required counts by tier:
+
+| Tier | New files needed | Why |
+|---|---|---|
+| 0 offline | 0 | pytest only |
+| 1 spike | 0 | done; lists the stage, transcribes nothing |
+| 2 clone | 0 | reuses an existing file via `--force-retranscribe` against a clone table |
+| 3 smoke | **1** | first real end-to-end run through the whole chain |
+| 4 hang validation | **12** | 4 consecutive runs × 3 files, per the honest success criterion |
+| 5 skip path | 0 | the point is that there is nothing new |
+
+**HUMAN 1 — total 13 new AV files.** Constraints that matter:
+
+- Filenames must not already appear in the 377, or the gate skips them. Dedup is on **bare
+  filename**, so a same-named file in a different folder still counts as done.
+- Follow `DATE ACCOUNT_description.ext`, i.e. `2026-09-25 10-30-00_Acme_topic.mp4`. The filename
+  parser takes the **second `_`-delimited field** as the account and does not validate, so a
+  non-conforming name silently yields a wrong `ACCOUNT_NAME` — see `--strict` in
+  `scripts/backfill_metadata.py` for the failure modes already in the data.
+- Modest length. 5-10 minutes each keeps a 3-file run near 10 minutes of GPU.
+- **Staging is safe and triggers nothing.** `TRANSCRIBE_NEW_FILES_TASK_V2` is suspended with no
+  schedule, so files can be dropped in and drained deliberately. Files can be staged all at once
+  and consumed 3 at a time via `--limit`.
+- If 13 real recordings is impractical, say so: existing media can be re-staged under new
+  `ZZTEST_NN_*` names to exercise the runtime. That validates the *mechanism* identically but adds
+  duplicate-content rows to `TRANSCRIPTION_RESULTS`. Those rows are trivially identifiable and
+  removable, but deleting them is a write to the production table and needs its own approval.
+  **Operator's choice — do not assume.**
+
+### Tier 0 — offline, free, no Snowflake
+
+```bash
+pytest tests/ -q          # 122 tests; must be green before anything else runs
+```
+
+Covers the 8 extracted functions against 239 rows of stored history. This is the gate that catches
+port bugs cheaply; everything below costs GPU time.
+
+### Tier 1 — spike. COMPLETE, all gates passed
+
+See task 1. No files, no writes, no human action.
+
+### Tier 2 — payload against a clone. PASSED 2026-09-24
+
+**Split into 2a (local, free) and 2b (container, real runtime) rather than the single
+"run locally" the plan originally specified.** Running the payload locally cannot work and
+should not: there is no torch or whisper on the dev Mac, and macOS CPU whisper output
+would not match an A10G anyway, so the comparison would be meaningless. 2b in the
+container against the clone tests the real environment AND writes nothing to production —
+strictly better on both counts.
+
+**2a — local dry run, `--dry-run --results-table ..._PORTTEST`.** Validated the named
+connection, `LIST`, the dedup contract and `--limit` for free. Reported `383 already
+transcribed, 0 new`, correct because the clone already held all six notebook-written test
+rows. Also confirmed the ledger renders `os_children=-1` on a platform with no `/proc`,
+which is the `None`-not-`[]` path working as designed.
+
+This required one payload change: `preflight(require_gpu=False)` under `--dry-run`.
+Mandatory GPU checks would have made the cheap validation step impossible to run anywhere
+but a GPU container, which defeats its purpose. ffmpeg is still checked either way.
+
+**2b — `EXECUTE JOB SERVICE`, payload from `@PAYLOAD_STAGE`, `--limit 1`.** Full trace:
+
+```
+connecting with the container OAuth token
+GPU: NVIDIA A10G, torch 2.9.1+cu129 · preflight OK
+stage holds 384 media file(s) · 383 already transcribed, 1 new · --limit 1 applied
+whisper loaded in 4.2s
+transcribed ..._TEST12.mp4: 255s audio in 19s, language=en, speakers=2
+inserted 1 record(s) into TRANSCRIPTION_RESULTS_PORTTEST
+LEDGER RECONCILE files=1 created=1 removed=1 unaccounted=0 on_disk=0 OK
+exit 0
+```
+
+**Isolation held: 1 row in the clone, 0 in `TRANSCRIPTION_RESULTS`.** Production stayed at
+499 throughout.
+
+**The ledger comparison is the headline result.** Same instrumentation, same account, same
+GPU, hours apart:
+
+| | Notebook (09-21 hung run) | Payload (Tier 2b) |
+|---|---|---|
+| fd | 76 | **46** |
+| threads | 12 | **2** |
+| non-daemon threads | 3 | **1** |
+| os_children | 1 | **0** |
+| exit | wedged 23 min | **exit 0** |
+
+One non-daemon thread is just `MainThread`. The notebook's three are the snowbook
+machinery the port exists to remove, and `os_children=1` is the ffmpeg `Popen` child that
+`multiprocessing.active_children()` could never see. This is not proof the hang is fixed —
+a single-file run proves nothing, per the honest success criterion — but the mechanism it
+depends on is measurably absent.
+
+**23-column comparison against the six notebook-written rows: structurally identical.**
+`FILE_TYPE`, `DETECTED_LANGUAGE`, `SPEAKER_COUNT`, `FILE_SIZE_BYTES`, `ACCOUNT_NAME`,
+`CALL_START_TS`, `PARTICIPANTS_JSON` and all seven summary fields match in shape, and
+`SRT_SEGS == TWS_SEGS` (61 == 61) satisfies the current-era generator invariant.
+
+One real difference found and fixed: **`FILE_PATH`**. The payload defaulted to `''` while
+the notebook sets `INCLUDE_FILE_PATH = True` and populates it. Nothing reads the column —
+it appears once in the whole repo, as a column definition — and both values are equally
+worthless as provenance (the notebook writes `media_files/<name>`, a relative path to a
+directory it deletes in cell 34). But a column flipping from populated to empty across a
+port is a diff a reviewer must chase for no benefit, so the default is now `True`, with
+`--no-file-path` to opt out. Content still differs by design and that is documented.
+
+### Tier 2 — original plan text, retained for reference
+
+1. `CREATE TABLE TRANSCRIPTION_RESULTS_PORTTEST CLONE TRANSCRIPTION_RESULTS` — zero-copy, free.
+2. Run the payload locally with `--results-table TRANSCRIPTION_RESULTS_PORTTEST
+   --force-retranscribe` against one existing file. `--force-retranscribe` is required because the
+   clone already contains all 377, so the dedup gate would otherwise skip everything.
+3. Diff all 23 columns against the notebook's row for the same file.
+
+**Expect these to differ and do not treat it as failure:** `PROCESSING_TIME_SECONDS`,
+`TRANSCRIPTION_TIMESTAMP`, the LLM summary text (non-deterministic), and — per the spike's torch
+finding — the transcript text and segment boundaries. Assert instead that `MEETING_TITLE`,
+`CALL_BRIEF`, `KEY_POINTS`, `NEXT_STEPS` are non-null and structurally correct, that the language
+detection matches, and that segment count is within a few percent.
+
+The real `TRANSCRIPTION_RESULTS` is never written in this tier.
+
+### Tier 3 — first real end-to-end run, 1 file
+
+**HUMAN 2 — take the backup before this tier.** `CREATE TABLE TR_PREPORT_BACKUP CLONE
+TRANSCRIPTION_RESULTS`. Free, and the only thing between a payload bug and 493 irreplaceable
+transcripts.
+
+Then, with the Streamlit dashboard open throughout — this tier is as much a dashboard test as a
+pipeline test:
+
+| Step | Check | Watch for |
+|---|---|---|
+| 1 | Upload 1 file via the dashboard's uploader | `validate_filename` accepts it; backlog count goes to 1 |
+| 2 | Click kickoff | Button **disables immediately** and stays disabled |
+| 3 | 0-20s in | Panel shows `STARTING`, not `IDLE`. **Blurb must not claim 60-180s** (task 4d) |
+| 4 | First progress event | Panel moves to a live phase; percentage advances |
+| 5 | Mid-run | Kickoff stays disabled for the whole run — the 18s window is the risk (task 4d item 2) |
+| 6 | Completion | `UNITS_DONE == UNITS_TOTAL`, `PCT_COMPLETE = 100.0`, terminal state **`SUCCEEDED`** |
+| 7 | After | Panel returns to `IDLE`; kickoff re-enables; `RUN_SOURCE = 'JOB_SERVICE'` renders |
+| 8 | Data | `TRANSCRIPTION_RESULTS` count increments by exactly 1; new row's 23 columns sane |
+| 9 | Ledger | `unaccounted=0 on_disk=0 OK` retrievable from the container log (task 4c) |
+
+A blank or `IDLE` panel during a live run means the instrumentation was not ported. That is the
+specific silent failure tasks 4b and 4d exist to prevent.
+
+**PASSED** — two runs. `TIER3_JOB_01` (1 file, TEST12) and `TIER3_JOB_02` (3 files: TEST09, TEST08,
+TEST07, 16/16 units, run `0132675d`). Production 499 -> 500 -> 503; all rows' 23 columns sane, all
+`SRT_SEGS == TWS_SEGS`, all 6 summary fields populated, `FILE_PATH` populated, ledger `OK`.
+Human-observed on the dashboard: live phase with advancing percentage, file counter advancing 1..3,
+current filename changing between files, kickoff disabled throughout, terminal green `SUCCEEDED`
+rendering `JOB_SERVICE`.
+
+Deviations from the steps as written, and what they cost:
+
+- **Steps 1-3 and 7 were not exercised as specified.** No task run backs a manual
+  `EXECUTE JOB SERVICE`, so `STARTING` is unreachable and step 3 could not run. Step 7's "returns to
+  `IDLE`" is also wrong as written: the view surfaces the *latest* run forever, so the panel
+  correctly holds `SUCCEEDED`, and the kickoff button correctly stays disabled via the
+  `n_backlog == 0` path (verified: backlog 0), not the `IS_ACTIVE` path. **Both are structural, not
+  defects** — but it means the 18s-window risk in step 5 is still only partly tested, because the
+  first event landed while `IS_ACTIVE` was already true.
+- **The 1-file run was too short to observe** — 53s total, with `FINISHING` open for 1 second. A
+  single-file run is effectively invisible to a polling dashboard. Re-ran with 3 files to get a
+  ~4 min window. Future dashboard checks should use >= 3 files.
+- **Task 4d confirmed real but unreachable here.** Every stale user-visible string lives in a
+  `STARTING` blurb (`sf_pipeline.py:176-178`) or a `HUNG` blurb (`:183`, `sf_theme.py:179`); the
+  rest are comments (`:41`, `:144`, `:338`). Neither state occurred, so a clean dashboard here is
+  **not** evidence 4d is done.
+
+Process failure worth keeping: `TIER3_JOB_01` ran a **stale payload**. The `FILE_PATH` default was
+fixed locally *after* the stage upload and never re-uploaded, so the column came back empty and the
+fix went untested while appearing to have been exercised. The staged copy was 35,840 bytes against
+36,958 local. This is exactly the trap `04_deploy_notebook.sh` documents. **Re-verify staged bytes
+after every edit; a successful `PUT` is not proof of deployment.** Note stage `size` reflects
+encryption padding (36,958 local -> 36,960 staged), so compare md5/timestamp, not exact bytes.
+Also remove `@PAYLOAD_STAGE/__pycache__/` — stale bytecode can shadow edited source.
+
+### Tier 4 — hang validation, 4 runs × 3 files
+
+The only tier that says anything about the hang. Single-file runs prove **nothing** — 0 of 8 ever
+hung; they sit in the regime that never failed.
+
+Per run, record all three budgets separately (startup / work / tail) plus the ledger verdict. Pass
+requires **every** run to close its last-event-to-task-end tail under **~30s** with `STATE` not
+`FAILED`. Do not compute the tail as `task_duration - event_span` — that includes startup and
+reports 126-149s for clean runs.
+
+After each run also confirm the dashboard did not show `WORK_COMPLETE_NOT_EXITED`. Post-port that
+state means a **new** exit fault, not the known benign one (task 4d item 3).
+
+**HUMAN 3 — if any run hangs, stop and consult before continuing.** Two hangs in ten runs is a
+rollback trigger. Also note a hung run leaks a GPU node indefinitely: `ALTER COMPUTE POOL
+TRANSCRIPTION_GPU_POOL_V2 STOP ALL;` then `SUSPEND`.
+
+**PASSED — 4 of 4 runs clean, 0 hangs.** Same 3 files every run (TEST12 255s, TEST07 562s,
+TEST03 767s = 26 min audio, ~200s work) written to `TRANSCRIPTION_RESULTS_PORTTEST`:
+
+| Run | Service | Startup | Work | **Tail** | Total | Terminal |
+|---|---|---|---|---|---|---|
+| 1 | `TIER4_RUN_01` / `758c06f3` | 112s | 168s | **5s** | 285s | SUCCEEDED |
+| 2 | `TIER4_RUN_02` / `2f7c5ff7` | 16s | 159s | **5s** | 180s | SUCCEEDED |
+| 3 | `TIER4_RUN_03` / `63d2bc8a` | 16s | 155s | **5s** | 176s | SUCCEEDED |
+| 4 | `TIER4_RUN_04` / `ef824c18` | 18s | 159s | **5s** | 182s | SUCCEEDED |
+
+Every run: 25 events, 3 files, 3/3 rows fully sane, `SUCCEEDED`. Tail **5s** against the 30s
+threshold, with zero variance. Zero `FAILED` events, zero `WORK_COMPLETE_NOT_EXITED`, production
+untouched at 503, pool `IDLE` with 0 jobs afterward. Against the pre-port baseline of **1 hang in 2
+notebook runs** (tail 5s clean vs 145s+ hung), the port eliminates the hang on this evidence.
+
+Two findings worth carrying forward:
+
+- **Warm-pool startup is 16-18s, not 112s.** Run 1 paid 112s on a cold pool; runs 2-4 reused the
+  warm node. The notebook's comparable figure was 127s. This makes the cost case materially better
+  than the ~27% estimate, which assumed cold starts, and it is why the `STARTING` blurb's "60-180s"
+  is wrong in both directions (task 4d).
+- **Tail is 5s flat across all four runs.** Identical to the *clean* notebook run, so the port does
+  not trade the hang for a slower teardown.
+
+Methodology notes, because two of these were nearly measurement errors:
+
+- **`--force-retranscribe` was NOT used, deliberately.** `discover()` takes `sorted(staged)` over the
+  whole stage, so `--force-retranscribe --limit 3` would have transcribed 3 real meeting files and
+  left `RUN_EVENTS` rows that `cleanup_test_artifacts.sql` cannot match by filename. Instead the
+  clone was armed by deleting exactly the 3 target rows before each run, making those files the only
+  new work. Verified 3 new / 0 non-test before run 1. **A `--pattern` / file-filter argument would
+  make this tier much safer to repeat.**
+- **Tail must be measured statement-end minus last-event.** Runs were synchronous
+  (`ASYNC` omitted) so the `EXECUTE JOB SERVICE` statement returns at container exit, making
+  `QUERY_HISTORY.END_TIME` the true teardown moment - the job-service analogue of task end.
+- **`INFORMATION_SCHEMA.QUERY_HISTORY(RESULT_LIMIT => N)` silently truncates.** At 400 it returned
+  only runs 3-4 and the verdict query reported 2 of 4 rows as though 1-2 did not exist. Raising the
+  limit surfaced all four. A measurement query that can quietly lose runs is worse than none.
+- **`DIRECTORY()` is stale after `PUT`.** A verification query using it reported 383 media files and
+  missed 4 test files entirely; `ALTER STAGE REFRESH` then registered exactly those 4. Use `LIST`,
+  as `discover()` does, or refresh first.
+
+### Tier 5 — skip path and rollback rehearsal, 0 files
+
+1. Trigger with no new files. Expect `SKIPPED` in seconds and **no GPU launch**. Confirm the
+   compute pool shows no new job.
+2. **Rehearse the rollback on purpose** — flip `PROJECT_LAUNCH_MODE` to `'NOTEBOOK'`, republish,
+   recreate the procedure, run one file, confirm it completes. Then flip back. Discovering the
+   rollback works under pressure is the failure mode this avoids.
+3. Confirm the pool shows one job per run, not phantom multi-hour sessions.
+
+### Commit gate
+
+**HUMAN 4 — only after Tiers 0-5 pass does anything get committed.** Commit as a series: payload,
+Streamlit changes, config additions, plan updates. Keep `NOTEBOOK` mode reachable until the 4
+consecutive clean multi-file runs from Tier 4 are banked, per the Rollback section.
+
 
 The port replaces the only working transcription path with an unproven one, against a hang that is
 **intermittent** — 1 of 6 runs in the current 7-day window, and it has previously produced a

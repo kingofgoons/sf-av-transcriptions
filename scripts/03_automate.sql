@@ -18,6 +18,20 @@
 --     Whatever role runs this becomes their owner, and CREATE OR REPLACE TASK drops
 --     the uploader's OPERATE grant. If you re-run it, redo Step 4 (ownership) and
 --     confirm the OPERATE grant survived. See DIARY.md 2026-08-18.
+--
+-- ⚠️  THIS SCRIPT NEEDS A ROLE-CAPABLE CONNECTION. It contains USE ROLE SYSADMIN, and a
+--     role-restricted session (for example one authenticating with a PAT) rejects that
+--     with "Current session is restricted. USE ROLE not allowed." The DEMO connection is
+--     restricted, so this script cannot be run end-to-end from it.
+--
+--     To change ONLY the gate procedure from a restricted session, run the Step 1 block
+--     below on its own and then transfer ownership, exactly as Step 4 does:
+--         GRANT OWNERSHIP ON PROCEDURE TRANSCRIBE_IF_NEW_FILES()
+--             TO ROLE SYSADMIN COPY CURRENT GRANTS;
+--     That is preferable for a launch-mode switch anyway, because it leaves the task
+--     untouched and therefore does not drop the uploader's OPERATE grant. Wrap the
+--     anonymous block in EXECUTE IMMEDIATE $$...$$ if running it through `snow sql -f`,
+--     which splits input on semicolons and would otherwise deliver it as fragments.
 --#############################################################################
 
 EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
@@ -32,17 +46,29 @@ EXECUTE IMMEDIATE FROM @TRANSCRIPTION_DEPLOY.PUBLIC.SCRIPTS/00_config.sql;
 --
 -- `av.uploader/upload_av_files.py` fires `EXECUTE TASK` after a successful upload.
 -- The task calls TRANSCRIBE_IF_NEW_FILES(), which diffs the stage against
--- TRANSCRIPTION_RESULTS and launches the GPU notebook ONLY when an untranscribed
+-- TRANSCRIPTION_RESULTS and launches the GPU transcription ONLY when an untranscribed
 -- media file exists. Nothing polls; nothing runs when nothing was uploaded.
 --
+-- WHAT ACTUALLY RUNS is selected by $PROJECT_LAUNCH_MODE in 00_config.sql:
+--   'JOB_SERVICE' (current) runs scripts/payload/transcribe_job.py in a container.
+--   'NOTEBOOK'              runs the notebook, retained as the rollback path.
+-- See the launch-mode block in 00_config.sql for why the port exists (measured 1 hang
+-- in 2 notebook runs, versus 4 of 4 clean as a job service).
+--
 -- EXECUTE TASK is ASYNCHRONOUS, so the uploader returns immediately rather than
--- blocking on the transcription. (EXECUTE NOTEBOOK inside the task IS synchronous.)
+-- blocking on the transcription. The launch statement INSIDE the task is synchronous in
+-- both modes, which is what keeps the dashboard's STARTING and HUNG states working.
 --
 -- ⚠️  IF YOU UPLOAD TO THE STAGE WITHOUT THE UPLOADER (manual PUT, Snowsight, any
 --     other client) NOTHING WILL TRANSCRIBE IT. Trigger the pipeline yourself:
 --         EXECUTE TASK TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIBE_NEW_FILES_TASK_V2;
---     or inspect first without launching anything:
---         CALL TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIBE_IF_NEW_FILES();
+--
+-- ⚠️  THERE IS NO DRY RUN. `CALL TRANSCRIBE_IF_NEW_FILES()` LAUNCHES a GPU run whenever
+--     untranscribed media exists - it returns SKIPPED only when the backlog is empty.
+--     This file and agents.md both previously described that CALL as a way to inspect
+--     the verdict "without launching anything", which is false. To see what the gate
+--     would decide without acting on it, run the read-only backlog query in the
+--     verification section at the bottom of this script.
 --
 -- WHY NOT A SCHEDULE (the previous design):
 --   The task used to gate on WHEN SYSTEM$STREAM_HAS_DATA('AV_STAGE_STREAM_V2'),
@@ -131,9 +157,52 @@ USE WAREHOUSE IDENTIFIER($PROJECT_WH);
 --
 -- Using an anonymous block because the SQL exceeds the 256-byte session
 -- variable limit.
+--
+-- LAUNCH MODE: the ELSE branch below is assembled from $PROJECT_LAUNCH_MODE at BUILD
+-- time, not evaluated at run time, so the deployed procedure contains exactly one launch
+-- statement and no runtime branching. Switching modes means re-running this script.
+--
+--   'NOTEBOOK'    -> EXECUTE NOTEBOOK (the original path, kept as the rollback target)
+--   'JOB_SERVICE' -> DROP SERVICE + EXECUTE JOB SERVICE against the staged payload
+--
+-- WHY SYNCHRONOUS (no ASYNC = TRUE): the dashboard's STARTING and HUNG states are both
+-- derived from the TASK being in EXECUTING state, which only holds while the launch
+-- statement blocks. ASYNC would return in ~2s and the panel would show the previous
+-- run's terminal card for the whole startup window, which reads as "nothing happened".
+-- Cost of blocking is ~3-6 min of warehouse hold per run (~0.2 credits/day at current
+-- volume). Verified 2026-09-25: a task timeout CANCELS the job and removes the service
+-- (pool back to num_jobs = 0), so blocking does NOT risk a leaked GPU node.
+--
+-- WHY DROP SERVICE FIRST: EXECUTE JOB SERVICE against a name that already exists fails
+-- with "Object ... already exists", even when the previous job is DONE. One stable name
+-- plus a drop is preferred over generating a unique name per run, because nothing would
+-- ever clean up generated names - a few runs a day becomes ~1500 job objects a year.
 DECLARE
     sql_cmd VARCHAR;
+    launch_stmt VARCHAR;
+    launch_label VARCHAR;
 BEGIN
+    IF ($PROJECT_LAUNCH_MODE = 'JOB_SERVICE') THEN
+        launch_label := 'job service';
+        -- CHR(39) rather than escaped quotes for SPECIFICATION_FILE. This string is
+        -- inserted raw into the procedure DDL, which is itself being built inside a
+        -- quoted string, so the literal needs exactly one quote at the DDL level -
+        -- and hand-counting '''' across two nesting levels is how that breaks silently.
+        launch_stmt :=
+            'DROP SERVICE IF EXISTS ' || $FQ_JOB || ';
+            EXECUTE JOB SERVICE
+              IN COMPUTE POOL ' || $PROJECT_COMPUTE_POOL || '
+              NAME = ' || $FQ_JOB || '
+              QUERY_WAREHOUSE = ' || $PROJECT_WH || '
+              EXTERNAL_ACCESS_INTEGRATIONS = (' || $PROJECT_PYPI_INTEGRATION ||
+                  ', ' || $PROJECT_ALLOW_ALL_INTEGRATION || ')
+              FROM @' || $FQ_STAGE_PAYLOAD || '
+              SPECIFICATION_FILE = ' || CHR(39) || $PROJECT_JOB_SPEC_FILE || CHR(39) || ';';
+    ELSE
+        launch_label := 'notebook';
+        launch_stmt := 'EXECUTE NOTEBOOK ' || $FQ_NOTEBOOK || '();';
+    END IF;
+
     sql_cmd := 'CREATE OR REPLACE PROCEDURE TRANSCRIBE_IF_NEW_FILES()
         RETURNS STRING
         LANGUAGE SQL
@@ -141,6 +210,7 @@ BEGIN
     AS
     DECLARE
         new_file_count INTEGER;
+        active_runs INTEGER;
         msg STRING;
         ignored STRING;
     BEGIN
@@ -155,11 +225,27 @@ BEGIN
               IN (''mp3'',''wav'',''m4a'',''flac'',''aac'',''ogg'',
                   ''mp4'',''avi'',''mov'',''mkv'',''webm'',''flv'');
 
-        IF (new_file_count = 0) THEN
-            msg := ''SKIPPED: no untranscribed media in stage; GPU notebook not launched.'';
+        -- Refuse to launch on top of a live run. This matters specifically because the
+        -- JOB_SERVICE path DROPs the service before creating it, so a second launch
+        -- would kill a transcription already in progress and lose the whole batch
+        -- (records are persisted once, after every file is transcribed).
+        --
+        -- The task cannot overlap itself, so the exposure is a manual CALL. Uses the
+        -- SAME signal the dashboard uses, so the gate and the UI can never disagree.
+        -- The heartbeat bound is essential: keying on IS_ACTIVE alone would let a run
+        -- that died without emitting a terminal event block the gate permanently.
+        SELECT COUNT(*) INTO :active_runs
+        FROM ' || $FQ_RUN_STATUS || '
+        WHERE IS_ACTIVE
+          AND SECONDS_SINCE_HEARTBEAT < ' || $PROJECT_RUN_STALE_SECS || ';
+
+        IF (active_runs > 0) THEN
+            msg := ''BLOCKED: a transcription run is already in flight; nothing launched.'';
+        ELSEIF (new_file_count = 0) THEN
+            msg := ''SKIPPED: no untranscribed media in stage; ' || launch_label || ' not launched.'';
         ELSE
-            EXECUTE NOTEBOOK ' || $FQ_NOTEBOOK || '();
-            msg := ''LAUNCHED: notebook run for '' || new_file_count || '' new file(s).'';
+            ' || launch_stmt || '
+            msg := ''LAUNCHED: ' || launch_label || ' run for '' || new_file_count || '' new file(s).'';
         END IF;
 
         BEGIN
@@ -175,7 +261,11 @@ BEGIN
 END;
 
 -- Smoke-test the gate before wiring it to the task.
--- With no new files this must return SKIPPED and must NOT start a container.
+--
+-- ⚠️  THIS IS NOT A DRY RUN. If untranscribed media exists, this LAUNCHES a GPU run.
+--     It returns SKIPPED only when the backlog is empty. Earlier revisions of this file
+--     and of agents.md both described this CALL as a way to see the verdict "without
+--     launching a container", which is false and would cost credits to discover.
 CALL TRANSCRIBE_IF_NEW_FILES();
 
 
@@ -332,8 +422,8 @@ ORDER BY START_TIME DESC;
 -- Trigger a run now (this is exactly what the uploader does)
 -- EXECUTE TASK IDENTIFIER($PROJECT_TASK_TRANSCRIBE);
 
--- Inspect what the gate would do WITHOUT launching anything
--- CALL TRANSCRIBE_IF_NEW_FILES();
+-- To see what the gate WOULD do without launching anything, run the read-only backlog
+-- query above. Do NOT use CALL TRANSCRIBE_IF_NEW_FILES() for that: it launches.
 
 -- Drop the task if needed to reset
 -- DROP TASK IF EXISTS IDENTIFIER($PROJECT_TASK_TRANSCRIBE);

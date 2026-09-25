@@ -176,7 +176,10 @@ STATE_STYLE = {
     'FINISHING':                ('#1f77b4', '#eaf2fb', 'FINISHING',         'Work committed, container winding down'),
     'CELLS_COMPLETE':           ('#4CAF50', '#eaf7ea', 'COMPLETE',          'All notebook cells finished'),
     'SUCCEEDED':                ('#4CAF50', '#eaf7ea', 'SUCCEEDED',         'Run completed cleanly'),
-    'WORK_COMPLETE_NOT_EXITED': ('#FF9800', '#fff4e5', 'HUNG (work saved)', 'Transcripts were written but the container has not exited. Known snowbook shutdown hang - the data is safe.'),
+    # Post-port this is an ANOMALY, not the old benign snowbook hang: the job-service
+    # payload reports its own clean exit, so work saved with the container still up means
+    # a new exit fault. The data is safe either way; the container needs investigating.
+    'WORK_COMPLETE_NOT_EXITED': ('#FF9800', '#fff4e5', 'HUNG (work saved)', 'Transcripts were written but the container has not exited. The data is safe - investigate the container.'),
     'STALLED':                  ('#FF5722', '#ffece7', 'STALLED',           'No heartbeat for over 10 minutes'),
     'FAILED':                   ('#9E9E9E', '#f5f5f5', 'FAILED',            'Run reported a failure'),
     'IDLE':                     ('#9E9E9E', '#f5f5f5', 'IDLE',              'No pipeline runs recorded yet'),

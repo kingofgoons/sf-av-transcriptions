@@ -37,10 +37,16 @@ def get_run_status(session):
 def get_task_state(session):
     """Most recent task run state, straight from TASK_HISTORY.
 
-    This is the AUTHORITATIVE answer to "is the container still up?". The notebook
-    cannot report its own clean exit - the snowbook shutdown hang happens after the
-    last cell runs, so a hung run still emits CELLS_COMPLETE. Only the task knows
-    whether EXECUTE NOTEBOOK actually returned.
+    This is the AUTHORITATIVE answer to "is the container still up?", and it is why the
+    launch statement inside the task is deliberately SYNCHRONOUS in both launch modes:
+    the task stays EXECUTING for the run's duration, so STARTING and the hang check
+    below both have something to key on. An ASYNC launch would return in ~2s and this
+    signal would go dark for the whole startup window.
+
+    Historically this existed because the notebook could not report its own clean exit -
+    the snowbook shutdown hang happens after the last cell, so a hung run still emitted
+    CELLS_COMPLETE. The job-service payload DOES report its own exit (it emits SUCCEEDED),
+    but the task remains the independent check that the container actually went away.
     """
     if session is None:
         return None
@@ -140,10 +146,10 @@ def render_status_panel(session, refresh_stage=False):
     n_backlog = 0 if backlog is None or backlog.empty else len(backlog)
 
     # TASK_HISTORY is read on EVERY poll, not just when a run looks complete. It is the
-    # only source that knows a task is executing before the notebook has emitted anything,
-    # which is a 60-180s window (measured: 62s to first event on a warm pool; a cold GPU
-    # pool resume adds to that). Without this the panel shows the PREVIOUS run's terminal
-    # card for minutes after a kickoff, which reads as "nothing happened".
+    # only source that knows a task is executing before the container has emitted
+    # anything. Measured 2026-09-25 for the job-service payload: 16-18s to first event on
+    # a warm pool, 112s on a cold one. Without this the panel shows the PREVIOUS run's
+    # terminal card for that whole window, which reads as "nothing happened".
     # Cost: one INFORMATION_SCHEMA table function call per refresh. Cheap, but not free -
     # this is why auto-refresh defaults to OFF.
     task = get_task_state(session)
@@ -173,15 +179,17 @@ def render_status_panel(session, refresh_stage=False):
             if hb is not None and elapsed is not None and hb > elapsed:
                 state = 'STARTING'
                 accent, bg, label, _ = STATE_STYLE[state]
-                blurb = (f"A run started {elapsed}s ago. The notebook installs Whisper "
+                blurb = (f"A run started {elapsed}s ago. The container installs Whisper "
                          f"before it can report progress, so the first update takes "
-                         f"roughly 60-180s (longer on a cold GPU pool).")
+                         f"roughly 20s on a warm GPU pool, or around 2 minutes if the "
+                         f"pool has to resume from cold.")
             elif state == 'CELLS_COMPLETE':
                 state = 'WORK_COMPLETE_NOT_EXITED'
                 accent, bg, label, _ = STATE_STYLE[state]
-                blurb = (f"All cells finished but the task is still EXECUTING after "
-                         f"{elapsed}s. Known snowbook shutdown hang - "
-                         f"transcripts are already saved.")
+                blurb = (f"All work finished but the task is still EXECUTING after "
+                         f"{elapsed}s. Transcripts are already saved. Investigate: "
+                         f"since the job-service port this is NOT the old benign "
+                         f"snowbook hang.")
 
     detail_lines = []
     # In STARTING, `run` is the PREVIOUS execution. Showing its phase and "8 of 8 units
@@ -335,11 +343,16 @@ def render_controls(session, run, n_backlog, state):
     # IS_ACTIVE comes from the view: false once a run reaches CELLS_COMPLETE, SUCCEEDED or
     # FAILED. A wedged container still counts as active, because it is still holding a GPU.
     #
-    # STARTING must block too. IS_ACTIVE is false during the 60-180s before the notebook
-    # emits its first event, so keying only on IS_ACTIVE left the button live immediately
-    # after a kickoff. The task's ALLOW_OVERLAPPING_EXECUTION = FALSE would reject the
-    # second run, so it was never dangerous - but the button appeared to do nothing, which
-    # is a poor way to discover that.
+    # STARTING must block too. IS_ACTIVE is false during the window before the container
+    # emits its first event (16-18s warm, 112s cold as measured 2026-09-25), so keying
+    # only on IS_ACTIVE left the button live immediately after a kickoff. The task's
+    # ALLOW_OVERLAPPING_EXECUTION = FALSE rejects a second task run, and the gate
+    # procedure itself now returns BLOCKED while a run is in flight - but the button
+    # appearing to do nothing is a poor way to discover either of those.
+    #
+    # The gate's BLOCKED branch matters more since the job-service port: that path DROPs
+    # the job service before creating it, so a launch on top of a live run would kill a
+    # transcription in progress and lose the whole batch.
     is_active = (bool(run.get('IS_ACTIVE')) if run else False) or state == 'STARTING'
 
     col_run, col_up = st.columns([1, 2])

@@ -116,21 +116,107 @@ def fake_snow(tmp_path):
 # T0.1  the extraction changed no values
 # ---------------------------------------------------------------------------
 
-def test_template_matches_preextract_fixture():
-    """The template must differ from the pre-extraction file ONLY in CONFIG_REVISION.
+# SET names added to the template SINCE the extraction, deliberately, each with the
+# commit that added it. Additions must be listed here explicitly: that requirement is
+# the point, not overhead. It forces a new config value to be a reviewed decision rather
+# than something that appears in a diff nobody reads.
+#
+# Anything NOT on this list that differs from the pre-extraction fixture is still a hard
+# failure, so the original guarantee - no silent retargeting of the project - is intact.
+ADDED_SINCE_EXTRACTION = {
+    # 2026-09-24: compute sizing moved out of 02_setup.sql into config so that a
+    # reconciling ALTER can enforce it. The pool had drifted to the 3600s platform
+    # default because AUTO_SUSPEND_SECS was never in the DDL at all.
+    'PROJECT_POOL_INSTANCE_FAMILY',
+    'PROJECT_POOL_MIN_NODES',
+    'PROJECT_POOL_MAX_NODES',
+    'PROJECT_POOL_AUTO_SUSPEND_SECS',
+    'PROJECT_WH_SIZE',
+    'PROJECT_WH_AUTO_SUSPEND',
 
-    This is the regression guard for the whole refactor. Anything else differing
-    means a value was altered while moving 00_config.sql to a template, which would
-    silently retarget every script in the project.
+    # 2026-09-25: job-service launch path. The gate procedure can run either the GPU
+    # notebook or the headless payload; PROJECT_LAUNCH_MODE selects which, and is also
+    # the rollback switch. PAYLOAD_STAGE existed on the account for a day before it
+    # existed in code - it was created ad hoc during the port spike - which is exactly
+    # the drift the ENFORCED sync rule in agents.md exists to catch.
+    'PROJECT_LAUNCH_MODE',
+    'PROJECT_STAGE_PAYLOAD',
+    'PROJECT_JOB_NAME',
+    'PROJECT_JOB_SPEC_FILE',
+    'PROJECT_JOB_IMAGE',
+    'FQ_STAGE_PAYLOAD',
+    'FQ_JOB',
+}
+
+
+def _set_map(path):
+    """Map SET name -> full line, so additions and edits can be told apart."""
+    out = {}
+    for line in set_lines(path):
+        name = line.split('=', 1)[0].replace('SET', '', 1).strip()
+        out[name] = line
+    return out
+
+
+def test_template_matches_preextract_fixture():
+    """Every SET that existed before the extraction must still exist, unchanged.
+
+    This is the regression guard for the whole refactor: a value altered while moving
+    00_config.sql to a template would silently retarget every script in the project.
+
+    It permits ADDITIONS listed in ADDED_SINCE_EXTRACTION, because the template is a
+    living file and new config values are legitimate. It does NOT permit a pre-existing
+    value to change, or any SET to disappear, or an unlisted name to appear.
     """
     assert FIXTURE.exists(), "pre-extraction fixture is missing; regression is unprovable"
-    before, after = set_lines(FIXTURE), set_lines(TEMPLATE)
-    assert len(before) == len(after), "a SET statement was added or removed"
+    before, after = _set_map(FIXTURE), _set_map(TEMPLATE)
 
-    diffs = [(b, a) for b, a in zip(before, after) if b != a]
-    assert len(diffs) == 1, f"expected exactly one differing SET line, got {diffs}"
-    assert "CONFIG_REVISION" in diffs[0][0]
-    assert SENTINEL in diffs[0][1]
+    removed = set(before) - set(after)
+    assert not removed, f"SET statements disappeared from the template: {sorted(removed)}"
+
+    added = set(after) - set(before)
+    unexpected = added - ADDED_SINCE_EXTRACTION
+    assert not unexpected, (
+        f"new SET names not declared in ADDED_SINCE_EXTRACTION: {sorted(unexpected)}. "
+        "If the addition is intended, add it there with a dated reason.")
+
+    # Every pre-existing name must be byte-identical, except CONFIG_REVISION which the
+    # template deliberately carries as the sentinel for publish_config.sh to replace.
+    changed = [(n, before[n], after[n]) for n in before
+               if before[n] != after[n] and n != 'CONFIG_REVISION']
+    assert not changed, f"pre-existing SET values were modified: {changed}"
+
+    assert SENTINEL in after['CONFIG_REVISION'], (
+        "the template's CONFIG_REVISION must be the publish sentinel")
+
+
+def test_declared_additions_are_actually_present():
+    """Keeps ADDED_SINCE_EXTRACTION honest.
+
+    Without this, a name could be removed from the template while its entry lingered
+    here, and the test above would still pass because it only checks for unexpected
+    additions - not for stale declarations.
+    """
+    after = _set_map(TEMPLATE)
+    missing = ADDED_SINCE_EXTRACTION - set(after)
+    assert not missing, (
+        f"ADDED_SINCE_EXTRACTION lists names absent from the template: {sorted(missing)}")
+
+
+def test_new_config_values_reach_the_project_config_view():
+    """A config value the emitter does not project is invisible to the dashboard and to
+    scripts/09_drift_check.sql, which is how the pool's auto-suspend went unchecked.
+
+    The emitter builds V_PROJECT_CONFIG at the bottom of the template. Every compute
+    sizing value must appear there, or the drift check silently cannot see it.
+    """
+    text = TEMPLATE.read_text()
+    emitter = text[text.find('CREATE OR REPLACE VIEW'):]
+    assert emitter, "could not locate the V_PROJECT_CONFIG emitter in the template"
+    for name in sorted(ADDED_SINCE_EXTRACTION):
+        assert name in emitter, (
+            f"{name} is SET but never projected into V_PROJECT_CONFIG; "
+            "the drift check cannot verify it")
 
 
 def test_template_is_the_only_tracked_config():

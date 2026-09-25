@@ -208,14 +208,24 @@ def trigger_transcription(conn, task_name):
     tick whether or not there was work to do.
 
     EXECUTE TASK is ASYNCHRONOUS: it returns as soon as the run is queued, so this
-    does not block on the transcription itself. That matters because the task body
-    calls EXECUTE NOTEBOOK, which IS synchronous and can run for many minutes.
+    does not block on the transcription itself. That matters because the launch
+    statement inside the task body IS synchronous and can run for many minutes.
 
-    The task's gate procedure decides whether a GPU notebook actually launches, so
-    triggering when nothing is new is cheap and safe.
+    The task's gate procedure decides whether a GPU container actually launches, so
+    triggering when nothing is new is cheap and safe - it returns SKIPPED without
+    starting anything. Since 2026-09-25 that launch is an EXECUTE JOB SERVICE running
+    scripts/payload/transcribe_job.py rather than EXECUTE NOTEBOOK; the trigger contract
+    here is unchanged, and $PROJECT_LAUNCH_MODE in 00_config.sql selects between them.
+
+    The gate returns one of three verdicts, visible in TASK_HISTORY.RETURN_VALUE:
+    LAUNCHED, SKIPPED (no new media), or BLOCKED (a run is already in flight).
 
     Privileges: the caller needs OPERATE on the task. The task itself runs with its
     OWNER's privileges (SYSADMIN), not the uploader service role's.
+
+    Note this does NOT need to refresh the stage directory after PUT - the gate
+    procedure runs ALTER STAGE ... REFRESH as its first statement, which is why a
+    plain PUT from here is still seen as new work.
     """
     try:
         cursor = conn.cursor()
@@ -378,9 +388,21 @@ def main():
     # Upload AV files
     upload_av_files(config, args.directory)
 
-    # Offer Gong sync
+    # Offer Gong sync.
+    #
+    # NOTE FOR NON-INTERACTIVE CALLERS (cron, CI, an agent): this input() is reached
+    # AFTER the upload and the task trigger have already completed successfully, so a
+    # caller with no stdin appears to hang at a point where the real work is done. If you
+    # are scripting this, pipe an answer (`echo n | python upload_av_files.py`) or the
+    # process will sit here indefinitely and look like a stalled upload.
     print()
-    answer = input("Sync Gong calls from Snowhouse → DEMO? [y/N] ").strip().lower()
+    try:
+        answer = input("Sync Gong calls from Snowhouse → DEMO? [y/N] ").strip().lower()
+    except EOFError:
+        # No stdin at all: the upload has already succeeded, so decline and exit cleanly
+        # rather than dying with a traceback that implies the upload failed.
+        print("(no input available - skipping Gong sync)")
+        answer = 'n'
     if answer == 'y':
         sync_script = Path(__file__).parent.parent / 'scripts' / '06_sync_gong.sh'
         subprocess.run(['bash', str(sync_script)], cwd=sync_script.parent)

@@ -28,8 +28,10 @@ config blocks into scripts. Edit the file, bump `CONFIG_REVISION`, then run
 > ```sql
 > EXECUTE TASK TRANSCRIPTION_DB_V2.TRANSCRIPTION_SCHEMA_V2.TRANSCRIBE_NEW_FILES_TASK_V2;
 > ```
-> To see the gate's verdict without launching a GPU container:
-> `CALL ...TRANSCRIBE_IF_NEW_FILES();`
+> To see what the gate WOULD do without acting on it, run the read-only backlog query in
+> the verification section of `scripts/03_automate.sql`. **Do NOT use
+> `CALL ...TRANSCRIBE_IF_NEW_FILES()` for that — it LAUNCHES a GPU run whenever
+> untranscribed media exists.** It returns `SKIPPED` only when the backlog is empty.
 
 > **STATUS (2026-08-19):** Event-driven trigger deployed and validated. The ~2h hang on
 > **multi-file** runs is root-caused to Snowflake's `snowbook` runtime
@@ -158,11 +160,49 @@ accumulated three separate stale-doc bugs in two days.
 - `CREATE WAREHOUSE IF NOT EXISTS`, `CREATE COMPUTE POOL IF NOT EXISTS`.
 - Never bare `CREATE` — it fails on second run.
 
+### Deployed state must match code (ENFORCED)
+
+**The code is not evidence of how the account is configured.** `IF NOT EXISTS` is a no-op against
+an existing object, so a value written only into a `CREATE` is never enforced — the script asserts
+it, the account ignores it, and nothing compares them. This is not hypothetical: on 2026-09-24 the
+GPU pool was running at `AUTO_SUSPEND_SECS = 3600` (the platform default, **never set in code at
+all** — `git log -S AUTO_SUSPEND_SECS` confirms) while this file said to keep it low, and the
+warehouse was at `AUTO_SUSPEND = 600` while `02_setup.sql` claimed 60. The pool drift alone cost
+~12.6 credits over 35 days, more than the entire job-service port saves.
+
+Rules that follow:
+
+- **Never state a deployed value from reading a script.** Read it from the account — `SHOW COMPUTE
+  POOLS`, `SHOW WAREHOUSES`, `DESCRIBE NOTEBOOK`, `SHOW TASKS` — or say you have not checked.
+  Saying "the pool is set to X" because a `CREATE` says X is the error that hid this for months.
+- **Run `scripts/09_drift_check.sql` before trusting any claim about deployment state**, and after
+  any hand-run `ALTER`. It compares `V_PROJECT_CONFIG` against live `SHOW` output and prints
+  `OK` / `*** DRIFT ***` per setting. Read-only.
+- **Every operational setting belongs in `00_config.sql`, not inline in a script.** Sizing, idle
+  behaviour and timeouts are config values like object names are. Add them to the
+  `V_PROJECT_CONFIG` emitter too, or the drift check cannot see them.
+- **A `CREATE ... IF NOT EXISTS` for a settable object needs a reconciling `ALTER` after it**, so
+  re-running the script converges a live deployment instead of only building a correct new one.
+  `02_setup.sql` now does this for the warehouse and the pool.
+- **Two deliberate exceptions, both because reconciling is destructive:** table schemas (use
+  `migration/`, reviewed by a human) and `INSTANCE_FAMILY` (replaces nodes — change it by hand).
+- **When code and account disagree, decide which is right — do not assume code wins.** The
+  warehouse's deployed 600s was *better* than the coded 60s, because Snowflake bills a 60-second
+  minimum on every resume and this warehouse's main consumer is interactive Streamlit sessions. The
+  code was corrected to match the account. Reconciling blindly toward the script would have
+  increased cost while looking like a fix.
+- Same principle already applies elsewhere, for the same reason: `config.json` /
+  `config.template.json`, and `00_config.sql` / its published copy on the stage (compared by
+  content hash in `scripts/check_config_fresh.sh`). Deploying is not the same as verifying —
+  `scripts/04_deploy_notebook.sh` verifies staged bytes against local after upload because a
+  silent no-op deploy had happened before.
+
 ### SQL — Safety
 
 - **NEVER** suspend or drop `TRANSCRIPTION_GPU_POOL_V2` without confirming no transcription is running.
 - The pipeline is **event-driven with no polling**. A file landing on the stage by any route other than `upload_av_files.py` is never transcribed until someone runs `EXECUTE TASK`.
-- Before manually triggering, `CALL TRANSCRIBE_IF_NEW_FILES()` to see the verdict without launching a container. Do **not** rely on `SYSTEM$STREAM_HAS_DATA('AV_STAGE_STREAM_V2')` — it reports TRUE permanently because nothing consumes the stream.
+- **`CALL TRANSCRIBE_IF_NEW_FILES()` IS NOT A DRY RUN — it launches.** It starts a GPU run whenever untranscribed media exists, returning `SKIPPED` only on an empty backlog. This file previously claimed the opposite, which would cost credits to discover. To inspect without acting, use the read-only backlog query in `scripts/03_automate.sql`. Do **not** rely on `SYSTEM$STREAM_HAS_DATA('AV_STAGE_STREAM_V2')` either — it reports TRUE permanently because nothing consumes the stream.
+- The gate returns one of three verdicts: `BLOCKED` (a run is already in flight), `SKIPPED` (no new media), or `LAUNCHED`. `BLOCKED` exists because the `JOB_SERVICE` path **drops the job service before creating it**, so launching over a live run would kill a transcription in progress and lose the whole batch — records persist once, after every file completes.
 - `TRANSCRIBE_NEW_FILES_TASK_V2` and `TRANSCRIBE_IF_NEW_FILES()` must both be owned by **SYSADMIN**. Tasks run with the owner's privileges; a mismatch fails with `Unknown user-defined function ... TRANSCRIBE_IF_NEW_FILES`. After any `CREATE OR REPLACE` as ACCOUNTADMIN, transfer ownership with `COPY CURRENT GRANTS` to preserve the uploader's `OPERATE` grant.
 - Never run `EXECUTE NOTEBOOK` manually while a triggered task run is active — both launch against the same files concurrently.
 - Do not truncate or replace `TRANSCRIPTION_RESULTS` without confirming `SKIP_ALREADY_TRANSCRIBED = True` in the notebook — it and the task gate both dedup on that table.
@@ -196,7 +236,10 @@ accumulated three separate stale-doc bugs in two days.
 
 ### Cost Guardrails
 
-- Do not increase `AUTO_SUSPEND_SECS` on the GPU pool without a reason — GPU_NV_S is expensive at idle.
+- Do not increase `AUTO_SUSPEND_SECS` on the GPU pool without a reason — GPU_NV_S is expensive at idle. It is a config value (`PROJECT_POOL_AUTO_SUSPEND_SECS`, currently **300**), enforced by a reconciling `ALTER` in `02_setup.sql` and verified by `scripts/09_drift_check.sql`. It sat at the 3600s default until 2026-09-24 because it was never in the DDL — ~82% of each run's GPU cost was the pool idling after the work finished.
+- **`AUTO_SUSPEND` does not bound a hung run.** It counts *idle* time only, and a hung notebook container keeps the pool non-idle, so a leaked GPU node is unbounded regardless of this setting. After any hang, follow the reclaim procedure in `documents/operations/runbook.md` — `STOP ALL` then `SUSPEND`.
+- Lower is not always cheaper. Snowflake bills a **60-second minimum on every warehouse resume**, so an aggressive `AUTO_SUSPEND` on an interactively-used warehouse costs more than staying warm. `TRANSCRIPTION_WH_V2` is at 600s for this reason.
+- The warehouse has been the larger cost, not the GPU: 35.44 vs 16.87 credits over the 35 days to 2026-09-24, and ~72% of warehouse time is **Streamlit sessions** (1,357 exec-minutes from one user). Closing the dashboard is a bigger saving than most code changes.
 - `CORTEX.COMPLETE` is called once per file; long recordings produce large prompts and high credit use.
 - `REFRESH_STAGE_DIRECTORY_TASK_V2` is deprecated and must stay suspended — resuming it costs a warehouse tick every 5 minutes to maintain a directory table nothing reads.
 - Watch for the runaway pattern: if the task succeeds every 5 minutes at ~60–80s, the gate is broken and GPU containers are launching with no work. Healthy days show a handful of container sessions, not ~290.

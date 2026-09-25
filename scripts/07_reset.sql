@@ -53,17 +53,28 @@ USE SCHEMA IDENTIFIER($PROJECT_SCHEMA);
 ----------------------------------
 -- Step 0: Pre-flight — confirm nothing is mid-transcription
 ----------------------------------
--- Do NOT proceed if a notebook is actively running. NUM_JOBS > 0 or
--- ACTIVE_NODES > 0 means a transcription may be in flight; suspending the task
+-- Do NOT proceed if a transcription is actively running. NUM_JOBS > 0 or
+-- ACTIVE_NODES > 0 means a run may be in flight; suspending the task
 -- and recreating the stream underneath it risks a half-processed batch.
-SHOW COMPUTE POOLS LIKE $PROJECT_COMPUTE_POOL;
+--
+-- `SHOW ... LIKE $VARIABLE` is NOT valid SQL - SHOW takes a literal pattern, and a
+-- session variable there fails outright with "syntax error ... unexpected '$PROJECT_'".
+-- This script previously did exactly that and could not run past this line. SHOW
+-- everything and filter via RESULT_SCAN, the same approach scripts/09_drift_check.sql uses.
+SHOW COMPUTE POOLS;
+SELECT "name", "state", "num_jobs", "active_nodes", "idle_nodes"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" = $PROJECT_COMPUTE_POOL;
 
 -- Current state before we change anything (for the record)
 SELECT
     SYSTEM$STREAM_HAS_DATA($FQ_STREAM) AS STREAM_ARMED_BEFORE,
     CURRENT_TIMESTAMP() AS RESET_STARTED_AT;
 
-SHOW STREAMS LIKE $PROJECT_STREAM IN SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+SHOW STREAMS IN SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+SELECT "name", "stale", "stale_after", "mode"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" = $PROJECT_STREAM;
 -- Check the STALE and STALE_AFTER columns in the output above.
 
 
@@ -104,8 +115,12 @@ SELECT
     SYSTEM$STREAM_HAS_DATA($FQ_STREAM) AS STREAM_ARMED_AFTER,
     CURRENT_TIMESTAMP() AS RESET_COMPLETED_AT;
 
--- Confirm the new staleness deadline (should be ~14 days out)
-SHOW STREAMS LIKE $PROJECT_STREAM IN SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+-- Confirm the new staleness deadline (should be ~14 days out).
+-- Unfiltered SHOW + RESULT_SCAN, for the same reason as Step 0 above.
+SHOW STREAMS IN SCHEMA IDENTIFIER($PROJECT_SCHEMA);
+SELECT "name", "stale", "stale_after", "mode"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" = $PROJECT_STREAM;
 
 
 ----------------------------------
