@@ -257,20 +257,57 @@ exits, against a pre-port baseline of 1 hang in 2 notebook runs (145s+ tail on t
 
 ### Remaining before commit
 
-Nothing has been committed since `24f657c`, per the standing instruction.
+**COMPLETE — committed as `c055726` (not pushed; `origin/main` remains at `24f657c`).**
 
-1. Run `scripts/09_drift_check.sql` — must be clean, including the new `PAYLOAD_STAGE` rows.
-2. Full test suite (155 tests currently) plus new config tests.
-3. `scripts/cleanup_test_artifacts.sql` dry-run, review, then execute. **Extend it first** — Tier 4
-   left `RUN_EVENTS` rows and the clone contains rows for real files, neither matched by the
-   `_TEST##` filename predicate.
-4. Manual stage `REMOVE` of the 11 `_TEST##` media files.
-5. Drop: `TRANSCRIPTION_RESULTS_PORTTEST`, `TR_PREPORT_BACKUP`, `TR_HANGTEST_BACKUP`,
-   `TR_MULTIFILE_BACKUP`, `SPIKE_JOB_IN_PROC()`, `spike_minimal_spec.yaml`, and the spike/test job
-   services.
-6. Verify production is back to **493** rows and `AUDIO_VIDEO_STAGE` to its original file count.
-7. Then commit — one commit for the port, with `DIARY.md` covering the hang measurement (1-in-2
-   before, 0-in-4 after), the three code eras, and the compute-sizing drift fixes.
+1. Drift check — **10/10 OK**, including the two new `PAYLOAD_STAGE` rows.
+2. Test suite — **172 passing** (155 before; +17 from `tests/test_av_uploader.py`).
+3. Cleanup executed in two rounds (11 transcripts / 226 event rows, then 3 / 32), each
+   backed up first. **No extension was needed** after all: the existing mixed-run predicate
+   already matched, because every test run processed only `_TEST##` files. The clone was
+   dropped wholesale rather than filtered.
+4. Stage `REMOVE` done — 11 files, then 3.
+5. **Partially done by decision.** Dropped: `TRANSCRIPTION_RESULTS_PORTTEST`,
+   `SPIKE_JOB_IN_PROC()`, both spike specs, and all 13 spike/tier job services.
+   **Retained at the operator's request:** `TR_PREPORT_BACKUP`, `TR_PRECLEANUP_BACKUP`,
+   `TR_HANGTEST_BACKUP`, `TR_MULTIFILE_BACKUP` — to be dropped in a follow-up once the
+   commit is trusted.
+6. Production **493**, with 493 distinct filenames and gate backlog **0**. Stage holds
+   **377** media files, zero `_TEST##`, confirmed by both `LIST` and `DIRECTORY()`.
+   **Note the plan's "385" expectation could not be reconciled and should not be treated
+   as verified.** That figure came from session notes, and `DIRECTORY()` was separately
+   demonstrated to understate this stage by 4 files, so the baseline itself may have been a
+   stale reading. What IS verified: every `REMOVE` used a `_TEST##` pattern and named only
+   `_TEST##` files, backlog is 0 so every staged file has a transcript, and the transcript
+   count matches the pre-test baseline exactly. No real media file was removed.
+7. Committed, with `DIARY.md` 2026-09-25 covering the hang measurement, the spike findings,
+   the stale-payload failure, and the documentation corrections.
+
+### Work added beyond the original plan
+
+`av.uploader/` was never in scope, and should have been: `upload_av_files.py` is the
+primary production trigger whose whole job is firing the task this plan rewired, and
+`download_srts.py` consumes a column the payload writes. Neither had a single test.
+
+- Exercised the uploader end-to-end for real: 1 file (tail 9s) and a 2-file batch
+  (12/12 units, file counter advancing, 2 records written).
+- Ran `download_srts.py` against payload-written rows and confirmed the downloaded `.srt`
+  is **byte-identical (sha256)** to the stored `SRT_CONTENT`.
+- `tests/test_av_uploader.py` (17 tests) pins the writer/reader contract, because the SRT
+  generators exist **twice, independently implemented** — in the payload and in
+  `download_srts.py`. Guard proven by patching one side and watching it fail.
+- `upload_av_files.py` now tolerates absent stdin at the Gong prompt, which is reached
+  AFTER the upload and trigger succeed and made non-interactive runs look hung.
+
+### Open items
+
+- **Drop the four retained backup tables** when ready.
+- **Push** — the commit is local only.
+- **`__pycache__` reappears on `@PAYLOAD_STAGE` after every run**, written back by the
+  container through the volume mount. Harmless given the deploy ordering
+  (`REMOVE __pycache__` precedes the source upload, so the next run compiles fresh), but
+  worth knowing before anyone hand-edits a staged `.py` and wonders why behaviour lags.
+- The three out-of-scope items below, unchanged.
+
 
 ## Explicitly out of scope
 
